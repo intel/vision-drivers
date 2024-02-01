@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2024 Intel Corporation.
+
+config INTEL_CVS
+	tristate "Intel CVS"
+	depends on CONFIG_I2C
+	help
+	  Add support of Intel Computer Vision System (ICVS).

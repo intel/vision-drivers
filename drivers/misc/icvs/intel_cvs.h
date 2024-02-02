@@ -1,0 +1,37 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ * Intel Computer Vision System driver
+ *
+ * Copyright (C) 2024 Intel Corporation.
+ *
+ */
+
+#ifndef __INTEL_CVS_H__
+#define __INTEL_CVS_H__
+
+#include <linux/i2c.h>
+#include <linux/gpio/consumer.h>
+
+/* ICVS # of GPIOs */
+#define ICVS_FULL	4
+#define ICVS_LIGHT	2
+
+/* ICVS capability */
+enum icvs_cap {
+	ICVS_NOTSUP = 0,
+	ICVS_LIGHTCAP,
+	ICVS_FULLCAP
+};
+
+struct intel_cvs {
+	struct device *dev;
+	enum icvs_cap cap;
+
+	int irq;
+	struct gpio_desc *rst;
+	struct gpio_desc *req;
+	struct gpio_desc *resp;
+};
+
+#endif // __INTEL_CVS_H__

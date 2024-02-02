@@ -9,24 +9,151 @@
 
 #include <linux/module.h>
 #include <linux/acpi.h>
-#include <linux/i2c.h>
+
+#include "intel_cvs.h"
+#include "cvs_gpio.h"
+
+static irqreturn_t cvs_irq_handler(int irq, void *devid)
+{
+	struct intel_cvs *icvs = devid;
+	bool ret = false;
+
+	if (!icvs || !icvs->dev)
+		goto exit;
+
+	ret = true;
+
+exit:
+	return IRQ_RETVAL(ret);
+}
+
+static int cvs_init(struct intel_cvs *icvs)
+{
+	int ret = -EINVAL;
+
+	if (!icvs || !icvs->dev || !icvs->rst)
+		goto exit;
+
+	gpiod_set_value_cansleep(icvs->rst, 1);
+
+	ret = devm_request_irq(icvs->dev, icvs->irq, cvs_irq_handler,
+			IRQF_ONESHOT | IRQF_NO_SUSPEND, dev_name(icvs->dev), icvs);
+	if (ret)
+		dev_err(icvs->dev, "Failed to request irq\n");
+
+exit:
+	return ret;
+}
 
 static int cvs_i2c_probe(struct i2c_client *i2c)
 {
-	int ret = 0;
+	struct intel_cvs *icvs;
+	int ret = -ENODEV;
 
-	if (i2c)
-		dev_info(&i2c->dev, "%s\n", __func__);
-	else
-		ret = -ENODEV;
+	if (!i2c) {
+		pr_err("No I2C device\n");
+		goto exit;
+	}
+
+	dev_info(&i2c->dev, "%s\n", __func__);
+	icvs = devm_kzalloc(&i2c->dev, sizeof(struct intel_cvs), GFP_KERNEL);
+	if (!icvs) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	icvs->dev = &i2c->dev;
+	i2c_set_clientdata(i2c, icvs);
+
+	ret = gpiod_count(icvs->dev, NULL);
+	switch (ret) {
+		case ICVS_LIGHT:
+			icvs->cap = ICVS_LIGHTCAP;
+			break;
+		case ICVS_FULL:
+			icvs->cap = ICVS_FULLCAP;
+			break;
+		default:
+			dev_err(icvs->dev, "Number of GPIOs not supported: %d\n", ret);
+			devm_kfree(icvs->dev, icvs);
+			ret = -EINVAL;
+			goto exit;
+	}
+
+	ret = devm_acpi_dev_add_driver_gpios(icvs->dev, icvs->cap == ICVS_FULLCAP ?
+										icvs_acpi_gpios : icvs_acpi_lgpios);
+	if (ret) {
+		dev_err(icvs->dev, "Failed to add driver gpios\n");
+		goto exit;
+	}
+
+	/* Request GPIO */
+	icvs->req = devm_gpiod_get(icvs->dev, "req", GPIOD_OUT_HIGH);
+	if (IS_ERR(icvs->req)) {
+		dev_err(icvs->dev, "Failed to get REQUEST gpiod\n");
+		ret = -EIO;
+		goto exit;
+	}
+
+	/* Response GPIO */
+	icvs->resp = devm_gpiod_get(icvs->dev, "resp", GPIOD_IN);
+	if (IS_ERR(icvs->resp)) {
+		dev_err(icvs->dev, "Failed to get RESPONSE gpiod\n");
+		ret = -EIO;
+		goto exit;
+	}
+
+	if (icvs->cap == ICVS_FULLCAP) {
+		/* Reset GPIO */
+		icvs->rst = devm_gpiod_get(icvs->dev, "rst", GPIOD_OUT_LOW);
+		if (IS_ERR(icvs->rst)) {
+			dev_err(icvs->dev, "Failed to get RESET gpiod\n");
+			ret = -EIO;
+			goto exit;
+		}
+
+		/* Wake Interrupt */
+		ret = acpi_dev_gpio_irq_get_by(ACPI_COMPANION(icvs->dev), "wake-gpio", 0);
+		if (ret > 0)
+			icvs->irq = ret;
+		else {
+			dev_err(icvs->dev, "Failed to get WAKE interrupt: %d\n", ret);
+			goto exit;
+		}
+
+		ret = cvs_init(icvs);
+		if (ret)
+			dev_err(icvs->dev, "Failed to initialize\n");
+	}
+
+exit:
+	if (ret)
+		devm_kfree(icvs->dev, icvs);
 
 	return ret;
 }
 
+static void cvs_exit(struct intel_cvs *icvs)
+{
+	if (icvs && icvs->dev && icvs->rst) {
+		devm_free_irq(icvs->dev, icvs->irq, icvs);
+		gpiod_set_value_cansleep(icvs->rst, 0);
+	}
+}
+
 static void cvs_i2c_remove(struct i2c_client *i2c)
 {
-	if (i2c)
+	struct intel_cvs *icvs;
+
+	if (i2c) {
 		dev_info(&i2c->dev, "%s\n", __func__);
+		icvs = i2c_get_clientdata(i2c);
+		if (icvs) {
+			if (icvs->cap == ICVS_FULLCAP)
+				cvs_exit(icvs);
+			devm_kfree(&i2c->dev, icvs);
+		}
+	}
 }
 
 static struct acpi_device_id acpi_cvs_ids[] = {

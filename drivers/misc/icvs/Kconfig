@@ -3,6 +3,8 @@
 
 config INTEL_CVS
 	tristate "Intel CVS"
+	depends on CONFIG_ACPI
+	depends on CONFIG_GPIOLIB
 	depends on CONFIG_I2C
 	help
 	  Add support of Intel Computer Vision System (ICVS).

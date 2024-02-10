@@ -21,6 +21,8 @@ static irqreturn_t cvs_irq_handler(int irq, void *devid)
 	if (!icvs || !icvs->dev)
 		goto exit;
 
+	icvs->rst_retry = RST_RETRY;
+	hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT), HRTIMER_MODE_REL);
 	ret = true;
 
 exit:
@@ -38,11 +40,48 @@ static int cvs_init(struct intel_cvs *icvs)
 
 	ret = devm_request_irq(icvs->dev, icvs->irq, cvs_irq_handler,
 			IRQF_ONESHOT | IRQF_NO_SUSPEND, dev_name(icvs->dev), icvs);
-	if (ret)
+	if (ret) {
 		dev_err(icvs->dev, "Failed to request irq\n");
+		goto exit;
+	}
+
+	icvs->rst_retry = RST_RETRY;
+	hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT), HRTIMER_MODE_REL);
 
 exit:
 	return ret;
+}
+
+static void cvs_reset(struct work_struct *work)
+{
+	struct intel_cvs *icvs = container_of(work, struct intel_cvs, rst_task);
+
+	if (!icvs)
+		return;
+
+	dev_info(icvs->dev, "%s\n", __func__);
+	gpiod_set_value_cansleep(icvs->rst, 0);
+
+	if (icvs->rst_retry--) {
+		msleep(RST_TIME);
+		gpiod_set_value_cansleep(icvs->rst, 1);
+		hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT), HRTIMER_MODE_REL);
+	} else
+		 dev_err(icvs->dev, "%s: Device unresponsive!\n", __func__);
+}
+
+static enum hrtimer_restart cvs_wdt_reset(struct hrtimer *t)
+{
+	struct intel_cvs *icvs = container_of(t, struct intel_cvs, wdt);
+
+	if (!icvs)
+		goto exit;
+
+	dev_warn(icvs->dev, "%s\n", __func__);
+	schedule_work(&icvs->rst_task);
+
+exit:
+	return HRTIMER_NORESTART;
 }
 
 static int cvs_i2c_probe(struct i2c_client *i2c)
@@ -121,6 +160,11 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 			goto exit;
 		}
 
+		INIT_WORK(&icvs->rst_task, cvs_reset);
+
+		hrtimer_init(&icvs->wdt, CLOCK_REALTIME, HRTIMER_MODE_REL);
+		icvs->wdt.function = cvs_wdt_reset;
+
 		ret = cvs_init(icvs);
 		if (ret)
 			dev_err(icvs->dev, "Failed to initialize\n");
@@ -136,6 +180,7 @@ exit:
 static void cvs_exit(struct intel_cvs *icvs)
 {
 	if (icvs && icvs->dev && icvs->rst) {
+		hrtimer_cancel(&icvs->wdt);
 		devm_free_irq(icvs->dev, icvs->irq, icvs);
 		gpiod_set_value_cansleep(icvs->rst, 0);
 	}

@@ -12,10 +12,20 @@
 
 #include <linux/i2c.h>
 #include <linux/gpio/consumer.h>
+#include <linux/hrtimer.h>
+#include <linux/delay.h>
+#include <linux/workqueue.h>
 
 /* ICVS # of GPIOs */
 #define ICVS_FULL	4
 #define ICVS_LIGHT	2
+
+/* WDT timeout in ms */
+#define WDT_TIMEOUT	1600
+
+/* RESET values */
+#define RST_TIME	100
+#define RST_RETRY	5
 
 /* ICVS capability */
 enum icvs_cap {
@@ -32,6 +42,10 @@ struct intel_cvs {
 	struct gpio_desc *rst;
 	struct gpio_desc *req;
 	struct gpio_desc *resp;
+
+	int rst_retry;
+	struct hrtimer wdt;
+	struct work_struct rst_task;
 };
 
 #endif // __INTEL_CVS_H__

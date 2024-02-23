@@ -2,7 +2,7 @@
 # Copyright (c) 2024 Intel Corporation.
 
 obj-m += intel_cvs.o
-intel_cvs-y := drivers/misc/icvs/intel_cvs.o
+intel_cvs-y := drivers/misc/icvs/intel_cvs.o drivers/misc/icvs/intel_cvs_update.o
 
 KERNELRELEASE ?= $(shell uname -r)
 KERNEL_SRC ?= /lib/modules/$(KERNELRELEASE)/build

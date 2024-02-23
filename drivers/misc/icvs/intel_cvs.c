@@ -7,11 +7,14 @@
  *
  */
 
-#include <linux/module.h>
 #include <linux/acpi.h>
+#include <linux/intel_cvs.h>
+#include <linux/module.h>
 
-#include "intel_cvs.h"
 #include "cvs_gpio.h"
+
+static struct intel_cvs *cvs = NULL;  
+static void cvs_get_init_info(void);
 
 static irqreturn_t cvs_irq_handler(int irq, void *devid)
 {
@@ -21,6 +24,7 @@ static irqreturn_t cvs_irq_handler(int irq, void *devid)
 	if (!icvs || !icvs->dev)
 		goto exit;
 
+	icvs->cnt++;
 	icvs->rst_retry = RST_RETRY;
 	hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT), HRTIMER_MODE_REL);
 	ret = true;
@@ -63,6 +67,8 @@ static void cvs_reset(struct work_struct *work)
 	gpiod_set_value_cansleep(icvs->rst, 0);
 
 	if (icvs->rst_retry--) {
+		icvs->cnt = 0;
+		icvs->owner = CVS_CAMERA_NONE;
 		msleep(RST_TIME);
 		gpiod_set_value_cansleep(icvs->rst, 1);
 		hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT), HRTIMER_MODE_REL);
@@ -84,9 +90,27 @@ exit:
 	return HRTIMER_NORESTART;
 }
 
+static int find_shared_i2c(acpi_handle handle, const char *method_name)
+{
+	struct acpi_buffer buffer = {ACPI_ALLOCATE_BUFFER, NULL};
+	acpi_status status;
+	
+	status = acpi_evaluate_object(handle, (acpi_string)method_name, NULL, &buffer);
+	if (ACPI_FAILURE(status)) 
+		return -ENODEV;
+	
+	if (!buffer.pointer)
+		return -ENODEV;
+
+	ACPI_FREE(buffer.pointer);
+    	pr_info("%s: ACPI method %s found for i2c_shared\n", __func__, method_name);
+	return 0;
+}
+
 static int cvs_i2c_probe(struct i2c_client *i2c)
 {
 	struct intel_cvs *icvs;
+	acpi_handle handle;
 	int ret = -ENODEV;
 
 	if (!i2c) {
@@ -100,9 +124,9 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		ret = -ENOMEM;
 		goto exit;
 	}
-
 	icvs->dev = &i2c->dev;
 	i2c_set_clientdata(i2c, icvs);
+	cvs = icvs;
 
 	ret = gpiod_count(icvs->dev, NULL);
 	switch (ret) {
@@ -170,6 +194,15 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 			dev_err(icvs->dev, "Failed to initialize\n");
 	}
 
+	handle = ACPI_HANDLE(&i2c->dev);
+	if (!handle) {
+		dev_err(icvs->dev, "Failed to get ACPI handle\n");
+		goto exit;
+	}
+	icvs->i2c_shared = (find_shared_i2c(handle, "IICS") < 0) ? 0 : 1;
+
+	mdelay(1000);
+	cvs_get_init_info();
 exit:
 	if (ret)
 		devm_kfree(icvs->dev, icvs);
@@ -201,6 +234,256 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 	}
 }
 
+static int cvs_read_i2c(u16 cmd, char *data, int size)
+{
+	struct i2c_client *i2c = container_of(cvs->dev, struct i2c_client, dev);
+	int cnt;
+	u16 cvs_cmd = (((cmd) >> 8) & 0x00ff) | (((cmd) << 8) & 0xff00);
+
+	if (size < 0 || !data)
+		return -EINVAL;
+
+	cnt = i2c_master_send(i2c, (const char *)&cvs_cmd, sizeof(u16));
+	if (cnt != sizeof(u16)) {
+		dev_err(&i2c->dev, "%s: cmd %x ret %d (!=2)\n", __func__, cmd, cnt);
+		return -EIO;
+	}
+
+	cnt = i2c_master_recv(i2c, (char *)data, size);
+	return cnt;
+}
+
+int cvs_acquire_camera_sensor_internal(void)
+{
+	int val, retry = 20;
+
+	if (!cvs)
+		return -EINVAL;
+
+	if (cvs->icvs_state == CV_FW_DOWNLOADING_STATE)
+		return -EBUSY;
+
+	if (cvs->owner != CVS_CAMERA_IPU) {
+		do {
+			gpiod_set_value_cansleep(cvs->req, 0);
+			mdelay(GPIO_READ_DELAY_MS);
+			val = gpiod_get_value_cansleep(cvs->resp);
+		} while (val != 0 && retry--);
+
+		if (val != 0)
+			goto err_out;
+	}
+	cvs->int_ref_count++;
+	return 0;
+
+err_out:
+	dev_err(cvs->dev, "%s: error! val %d (!=0)\n", __func__, val);
+	return -EIO;
+}
+
+int cvs_release_camera_sensor_internal(void)
+{
+	int val, retry = 20;
+
+	if (!cvs)
+		return -EINVAL;
+
+	if (cvs->icvs_state == CV_FW_DOWNLOADING_STATE)
+		return -EBUSY;
+
+	if (cvs->owner != CVS_CAMERA_CVS) {
+		do {
+			gpiod_set_value_cansleep(cvs->req, 1);
+			mdelay(GPIO_READ_DELAY_MS);
+			val = gpiod_get_value_cansleep(cvs->resp);
+		} while (val != 1 && retry--);
+
+		if (val != 1)
+			goto err_out;
+	}
+	cvs->int_ref_count--;
+	return 0;
+err_out:
+	dev_err(cvs->dev, "%s: error! val %d (!=0)\n", __func__, val);
+	return -EIO;
+}
+
+static void cvs_get_init_info(void)
+{
+	if (cvs_acquire_camera_sensor_internal())
+		pr_err("%s: cvs_acquire_camera_sensor failed\n", __func__);
+
+	if (cvs_read_i2c(GET_DEVICE_STATE, (char *)&cvs->cvs_state, 
+			sizeof(char)) < 0)
+		pr_err("%s: GET_DEVICE_STATE failed\n", __func__);
+
+	if (cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver, 
+			sizeof(struct cvs_fw)) < 0)
+		pr_err("%s: GET_FW_VERSION failed\n", __func__);
+
+	if (cvs_read_i2c(GET_VID_PID, (char *)&cvs->id, 
+			sizeof(struct cvs_id)) < 0)
+		pr_err("%s: GET_PID_VID failed\n", __func__);
+        return;
+}
+
+int cvs_acquire_camera_sensor(struct cvs_mipi_config *config,
+			      cvs_privacy_callback_t callback,
+			      void *handle,
+			      struct cvs_camera_status *status)
+{
+	int ret;
+
+	if (!cvs)
+		return -EINVAL;
+
+	ret = cvs_acquire_camera_sensor_internal();
+	if (!ret) {
+		spin_lock(&cvs->lock);
+		cvs->owner = (cvs->ref_count <= 0) ? CVS_CAMERA_IPU : cvs->owner;
+		cvs->ref_count = (cvs->ref_count <= 0) ? 1 : (cvs->ref_count + 1);
+		spin_unlock(&cvs->lock);
+	}
+	return (ret) ? ret : 0;
+}
+EXPORT_SYMBOL_GPL(cvs_acquire_camera_sensor);
+
+int cvs_release_camera_sensor(struct cvs_camera_status *status)
+{
+	int ret;
+
+	if (!cvs)
+		return -EINVAL;
+
+	ret = cvs_release_camera_sensor_internal();
+	if (!ret) {
+		spin_lock(&cvs->lock);
+		cvs->ref_count = (cvs->ref_count > 0) ? (cvs->ref_count - 1) : 0;
+		cvs->owner = (cvs->ref_count == 0) ? CVS_CAMERA_CVS : cvs->owner;
+		spin_unlock(&cvs->lock);
+	}
+	return (ret) ? ret : 0;
+}
+EXPORT_SYMBOL_GPL(cvs_release_camera_sensor);
+
+#ifdef DEBUG_CVS       
+int cvs_get_state()
+{
+	if (!cvs)
+		return -EINVAL;
+
+	if (cvs_acquire_camera_sensor_internal())
+		return -EINVAL;
+
+	if (cvs_read_i2c(GET_DEVICE_STATE, (char *)&cvs->cvs_state, sizeof(char)) <= 0)
+		return -EIO;
+
+	cvs_release_camera_sensor_internal();
+	return 0;
+}
+
+int cvs_exec_cmd(enum cvs_command command)
+{
+	int rc;
+
+	if (!cvs)
+		return -EINVAL;
+
+	if (cvs_acquire_camera_sensor_internal())
+		return -EBUSY;
+
+	switch (command) {
+	case GET_DEVICE_STATE:
+		rc = cvs_read_i2c(GET_DEVICE_STATE, (char *)&cvs->cvs_state, sizeof(char));
+		if (rc <= 0)
+			goto err_out;
+		break;
+
+	case GET_FW_VERSION:
+		rc = cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver, sizeof(struct cvs_fw));
+		if (rc <= 0)
+			goto err_out;
+		break;
+
+	case GET_VID_PID:
+		rc = cvs_read_i2c(GET_VID_PID, (char *)&cvs->id, sizeof(struct cvs_id));
+		if (rc <= 0)
+			goto err_out;
+		break;
+
+	default:
+		pr_err("%s: command %x not implemented\n", __func__, command);
+	}
+
+	cvs_release_camera_sensor_internal();
+	return 0;
+err_out:
+	cvs_release_camera_sensor_internal();
+	pr_err("%s: CVs command 0x%x failed, cvs_read_i2c: %d\n", __func__,
+		command, rc);
+	return -EIO;
+}
+
+static ssize_t coredump_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	return sysfs_emit(buf,
+		"CVS VID/PID     : 0x%x 0x%x\n"
+		"CVS Firmware Ver: %d.%d.%d.%d (0x%x.0x%x.0x%x.0x%x)\n"
+		"CVS Device State: 0x%x\n"
+		"Reference Count : %d (internal %d)\n"
+		"CVS Owner       : %s\n"
+		"Isr Counter     : %lld\n"
+		"i2c shared      : %d\n", 
+		cvs->id.vid, cvs->id.pid,
+		cvs->ver.major, cvs->ver.minor, cvs->ver.hotfix, cvs->ver.build,
+		cvs->ver.major, cvs->ver.minor, cvs->ver.hotfix, cvs->ver.build,
+		cvs->cvs_state,
+		cvs->ref_count, cvs->int_ref_count,
+		(cvs->owner == CVS_CAMERA_CVS) ? "CVS" : ((cvs->owner == CVS_CAMERA_IPU) ? "IPU": "none"),
+		cvs->cnt, cvs->i2c_shared);
+}
+static DEVICE_ATTR_RO(coredump);
+
+static ssize_t cmd_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count)
+{
+	if (sysfs_streq(buf, "reset")) 
+		schedule_work(&cvs->rst_task);
+	else if (sysfs_streq(buf, "acquire"))
+		cvs_acquire_camera_sensor(NULL, NULL, NULL, NULL); 
+	else if (sysfs_streq(buf, "release"))
+		cvs_release_camera_sensor(NULL); 
+	else if (sysfs_streq(buf, "state"))
+		cvs_get_state(); 
+	else if (sysfs_streq(buf, "version"))
+		cvs_exec_cmd(GET_FW_VERSION); 
+	else if (sysfs_streq(buf, "id"))
+		cvs_exec_cmd(GET_VID_PID); 
+	else if (sysfs_streq(buf, "update"))
+		pr_err("%s: update not implemented\n", __func__); 
+	else
+		pr_err("%s: invalid %s command\n", __func__, buf);
+
+	return count;
+}
+
+static ssize_t cmd_show(struct device *dev, struct device_attribute *attr,
+			char *buf)
+{
+	return sysfs_emit(buf, "command: %s\n", 
+		"[coredump, reset, acquire, release, state, version, id, update]");
+}
+static DEVICE_ATTR_RW(cmd);
+
+static struct attribute *cvs_attrs[] = {
+	&dev_attr_coredump.attr,
+	&dev_attr_cmd.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(cvs);
+#endif    
+
 static struct acpi_device_id acpi_cvs_ids[] = {
 	{ "INTC10CF" }, /* MTL */
 	{ "INTC10DE" }, /* LNL */
@@ -215,10 +498,12 @@ static struct i2c_driver cvs_i2c_driver = {
 		.name = "Intel CVS driver",
 		.owner = THIS_MODULE,
 		.acpi_match_table = ACPI_PTR(acpi_cvs_ids),
+		.dev_groups = cvs_groups,
 	},
 	.probe = cvs_i2c_probe,
 	.remove = cvs_i2c_remove
 };
+
 
 static int __init icvs_init(void)
 {
@@ -238,6 +523,7 @@ static void __exit icvs_exit(void)
 }
 module_exit(icvs_exit);
 
+MODULE_AUTHOR("Lifu Wang <lifu.wang@intel.com>");
 MODULE_AUTHOR("Israel Cepeda <israel.a.cepeda.lopez@intel.com>");
 MODULE_DESCRIPTION("Intel CVS driver");
 MODULE_LICENSE("GPL v2");

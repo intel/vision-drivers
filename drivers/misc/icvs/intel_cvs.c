@@ -10,6 +10,7 @@
 #include <linux/acpi.h>
 #include <linux/intel_cvs.h>
 #include <linux/module.h>
+#include <linux/pm_runtime.h>
 
 #include "cvs_gpio.h"
 #include "intel_cvs_update.h"
@@ -31,7 +32,6 @@ static irqreturn_t cvs_irq_handler(int irq, void *devid)
 	if (icvs->fw_dl_task_finished == true)
 		hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT),
 			      HRTIMER_MODE_REL);
-
 	ret = true;
 exit:
 	return IRQ_RETVAL(ret);
@@ -223,7 +223,6 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		mdelay(FW_PREPARE_MS);
 		schedule_work(&icvs->fw_dl_task);
 	}
-
 exit:
 	if (ret)
 		devm_kfree(icvs->dev, icvs);
@@ -353,7 +352,7 @@ int cvs_release_camera_sensor_internal(void)
 	cvs->int_ref_count--;
 	return 0;
 err_out:
-	dev_err(cvs->dev, "%s:error! val %d (!=0)\n", __func__, val);
+	dev_err(cvs->dev, "%s:error! val %d (!=1)\n", __func__, val);
 	return -EIO;
 }
 
@@ -469,21 +468,50 @@ err_out:
 	return -EIO;
 }
 
+static void cvs_state_str(const enum cvs_state stat, u8 *buf)
+{
+	int n = 0;
+	
+	*buf = 0;
+	if (stat == DEVICE_OFF_STATE) {
+		sprintf(buf, "%s", "DEVICE_OFF_STATE");
+	}
+	else {
+		if (stat & PRIVACY_ON_BIT_MASK)
+			n += sprintf(buf + n, "%s, ", "PRIVACY_ON_BIT_MASK");
+		if (stat & DEVICE_ON_BIT_MASK)
+			n += sprintf(buf + n, "%s, ", "DEVICE_ON_BIT_MASK");
+		if (stat & SENSOR_OWNER_BIT_MASK)
+			n += sprintf(buf + n, "%s, ", "SENSOR_OWNER_BIT_MASK");
+		if (stat & DEVICE_DWNLD_STATE_MASK)
+			n += sprintf(buf + n, "%s, ", "DEVICE_DWNLD_STATE_MASK");
+		if (stat & DEVICE_DWNLD_ERROR_MASK)
+			n += sprintf(buf + n, "%s, ", "DEVICE_DWNLD_ERROR_MASK");
+		if (stat & DEVICE_DWNLD_BUSY_MASK)
+			n += sprintf(buf + n, "%s, ", "DEVICE_DWNLD_BUSY_MASK");
+	}
+	return;
+}
+
 static ssize_t coredump_show(struct device *dev, struct device_attribute *attr,
 			     char *buf)
 {
+	u8 stat_name[256] = "";
+
+	cvs_state_str(cvs->cvs_state, stat_name);
+
 	return sysfs_emit(
 		buf,
 		"CVS VID/PID     : 0x%x 0x%x\n"
 		"CVS Firmware Ver: %d.%d.%d.%d (0x%x.0x%x.0x%x.0x%x)\n"
-		"CVS Device State: 0x%x\n"
+		"CVS Device State: 0x%x (%s)\n"
 		"Reference Count : %d (internal %d)\n"
 		"CVS Owner       : %s\n"
 		"I2C Shared      : %d\n",
 		cvs->id.vid, cvs->id.pid, cvs->ver.major, cvs->ver.minor,
 		cvs->ver.hotfix, cvs->ver.build, cvs->ver.major, cvs->ver.minor,
-		cvs->ver.hotfix, cvs->ver.build, cvs->cvs_state, cvs->ref_count,
-		cvs->int_ref_count,
+		cvs->ver.hotfix, cvs->ver.build, cvs->cvs_state, stat_name,
+		cvs->ref_count, cvs->int_ref_count,
 		(cvs->owner == CVS_CAMERA_CVS) ?
 			"CVS" :
 			((cvs->owner == CVS_CAMERA_IPU) ? "IPU" : "none"),
@@ -531,6 +559,71 @@ static struct attribute *cvs_attrs[] = {
 ATTRIBUTE_GROUPS(cvs);
 #endif
 
+#ifdef CONFIG_PM
+static int cvs_suspend(struct device *dev)
+{
+	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
+	struct intel_cvs *icvs = i2c_get_clientdata(i2c);
+	int ret = 0; 
+	u64 timeout;
+
+	/* Wait for FW update complete */
+	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {	
+		cvs->close_fw_dl_task = true;
+		cvs->hostwake_event_arg = 1;
+		wake_up_interruptible(&cvs->hostwake_event);
+		timeout = msecs_to_jiffies(WAIT_HOST_WAKE_FLASH_LONG_MS * FW_MAX_RETRY);
+		ret = wait_event_interruptible_timeout(cvs->update_complete_event,
+							cvs->update_complete_event_arg == 1,
+							timeout);
+		if (ret <= 0) {
+			dev_err(icvs->dev, "%s: Failed to wait FW update complete\n", __func__);
+			ret = -EAGAIN;
+		}
+	}
+	if (icvs->cap == ICVS_FULLCAP) {	
+		/* Disable wdt & IRQ */
+		hrtimer_cancel(&icvs->wdt);
+		disable_irq(icvs->irq);
+	}
+
+	dev_info(icvs->dev, "%s completed\n", __func__);
+	return ret;
+}
+
+static int cvs_resume(struct device *dev)
+{
+	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
+	struct intel_cvs *icvs = i2c_get_clientdata(i2c);
+	int val = -1, retry = FW_MAX_RETRY;
+
+	/* Wait for bridge ready */
+	while (val < 0 && retry--) {
+		val = gpiod_get_value_cansleep(cvs->resp);
+		mdelay(WAIT_HOST_WAKE_NORMAL_MS);
+	}
+
+	if (val < 0) 
+		dev_err(icvs->dev, "%s: Failed to read gpio via usb bridge\n", __func__);
+
+	if (icvs->cap == ICVS_FULLCAP) {	
+		/* Restart IRQ and wdt, hrtimer_start would start by fw_dl_task */
+		enable_irq(icvs->irq);
+		schedule_work(&icvs->fw_dl_task);
+	}
+
+	dev_info(icvs->dev, "%s completed\n", __func__);
+	return 0;
+}
+
+static const struct dev_pm_ops icvs_pm_ops = {
+	SYSTEM_SLEEP_PM_OPS(cvs_suspend, cvs_resume)
+};
+#define ICVS_DEV_PM_OPS (&icvs_pm_ops)
+#else
+#define ICVS_DEV_PM_OPS NULL 
+#endif /* CONFIG_PM */
+
 static struct acpi_device_id acpi_cvs_ids[] = { { "INTC10CF" }, /* MTL */
 						{ "INTC10DE" }, /* LNL */
 						{ "INTC10E0" }, /* ARL */
@@ -538,12 +631,14 @@ static struct acpi_device_id acpi_cvs_ids[] = { { "INTC10CF" }, /* MTL */
 						{ /* END OF LIST */ } };
 MODULE_DEVICE_TABLE(acpi, acpi_cvs_ids);
 
+
 static struct i2c_driver cvs_i2c_driver = {
 	.driver = {
 		.name = "Intel CVS driver",
 		.owner = THIS_MODULE,
 		.acpi_match_table = ACPI_PTR(acpi_cvs_ids),
 		.dev_groups = cvs_groups,
+		.pm = pm_ptr(ICVS_DEV_PM_OPS),
 	},
 	.probe = cvs_i2c_probe,
 	.remove = cvs_i2c_remove

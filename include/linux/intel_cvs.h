@@ -158,6 +158,7 @@ struct intel_cvs {
 	enum icvs_sensor_state icvs_sensor_state;
 
 	int i2c_shared;
+	unsigned long long oem_prod_id;
 	enum cvs_camera_owner owner;
 	int ref_count;
 	int int_ref_count;
@@ -171,11 +172,9 @@ struct intel_cvs {
 	u32 fw_file_path[_MAX_PATH];
 	void* fw_buffer;
 	u32 fw_buffer_size;
-	bool fw_bin_file_found;
 	u32 max_flashtime_ms;
 	u8 cv_fw_state;
-	char* fw_filename;
-	char file_prefix[64];
+	char fw_filename[24];
 	bool fw_dl_task_finished;
 	bool fw_dl_needed;
 	bool close_fw_dl_task;

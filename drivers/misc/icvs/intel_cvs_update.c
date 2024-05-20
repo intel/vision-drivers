@@ -362,7 +362,11 @@ int cvs_dev_fw_dl(void)
 	}
 
 	if (!status) {
-		status = cvs_wait_for_host_wake(WAIT_HOST_WAKE_RESET_MS);
+		if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_RESET_MS)) {
+			dev_err(cvs->dev, "%s:CV reset FW boot hostwake error",
+				__func__);
+			return -ETIMEDOUT;
+		}
 	}
 
 	dev_info(cvs->dev, "%s:Exit with status:0x%x", __func__, status);
@@ -390,51 +394,6 @@ static int cvs_get_fwver_vid_pid(void)
 	}
 
 	return 0;
-}
-
-static bool iterate_files(struct dir_context *fdir, const char *name,
-			  int namelen, loff_t offset, u64 ino,
-			  unsigned int d_type)
-{
-	if (d_type == DT_REG &&
-	    strncmp(name, cvs->file_prefix, strlen(cvs->file_prefix)) == 0) {
-		dev_dbg(cvs->dev, "%s:File found: %s ", __func__, name);
-		cvs->fw_filename = (char *)devm_kzalloc(
-			cvs->dev, strlen(name) + 1, GFP_KERNEL);
-		strcpy(cvs->fw_filename, name);
-		cvs->fw_bin_file_found = true;
-
-		/* Return 'false' to stop (OR) if there are no more entries */
-		return false;
-	}
-
-	/* Return 'true' to keep going */
-	return true;
-}
-
-static bool cvs_search_fw_file(void)
-{
-	struct file *filp;
-	struct dir_context fdir = { 0 };
-	int ret;
-	const char *path_to_search = "/lib/firmware/";
-
-	sprintf(cvs->file_prefix, "%d-%d", cvs->id.vid, cvs->id.pid);
-	dev_dbg(cvs->dev, "%s:VID-PID as string: %s", __func__,
-		cvs->file_prefix);
-
-	filp = filp_open(path_to_search, O_RDONLY | O_DIRECTORY, 0);
-	if (IS_ERR_OR_NULL(filp)) {
-		dev_err(cvs->dev, "%s:Failed to open directory: %ld", __func__,
-			PTR_ERR(filp));
-		return PTR_ERR(filp);
-	}
-
-	fdir.actor = iterate_files;
-	fdir.pos = 0;
-	ret = iterate_dir(filp, &fdir);
-	filp_close(filp, NULL);
-	return cvs->fw_bin_file_found;
 }
 
 static u32 cvs_calc_checksum(void *data)
@@ -481,7 +440,7 @@ static int cvs_fw_parse(void)
 			ptr_fw_header->fw_ver.hotfix,
 			ptr_fw_header->fw_ver.build);
 
-	dev_info(cvs->dev, "%s:Lib VID:%d, PID:%d, fw_offset:%d",
+	dev_info(cvs->dev, "%s:Lib VID:0X%x, PID:0x%x, fw_offset:0x%x",
 			__func__, ptr_fw_header->vid_pid.vid,
 			ptr_fw_header->vid_pid.pid,
 			ptr_fw_header->fw_offset);
@@ -502,9 +461,12 @@ static int cvs_fw_parse(void)
 		(cvs->ver.hotfix != ptr_fw_header->fw_ver.hotfix) ||
 		(cvs->ver.build  != ptr_fw_header->fw_ver.build)) {
 		cvs->fw_dl_needed = true;
-		dev_info(cvs->dev, "%s:FW update needed", __func__);
-	} else
+		dev_dbg(cvs->dev, "%s:FW update needed", __func__);
+	}
+	else {
+		cvs->fw_dl_needed = false;
 		dev_info(cvs->dev, "%s:FW update not needed", __func__);
+	}
 
 	return 0;
 }
@@ -512,27 +474,33 @@ static int cvs_fw_parse(void)
 static bool evaluate_fw(void)
 {
 	int ret, status = 1;
-	dev_info(cvs->dev, "%s:file name is %s : %p\n", __func__,
-		 cvs->fw_filename, cvs->dev);
-	ret = firmware_request_nowarn(&cvs->file, cvs->fw_filename, cvs->dev);
+
+	if (cvs->oem_prod_id) {
+		sprintf(cvs->fw_filename, "cvs/%04X%04X-%04llX.bin",
+			cvs->id.vid, cvs->id.pid, cvs->oem_prod_id);
+	}
+	else
+		sprintf(cvs->fw_filename, "cvs/%04X%04X.bin",
+			cvs->id.vid, cvs->id.pid);
+
+	ret = request_firmware(&cvs->file, cvs->fw_filename, cvs->dev);
 	if (ret) {
 		dev_err(cvs->dev,
-			"%s:firmware_request_nowarn() fail with ret:%d\n",
+			"%s:request_firmware() fail with ret:%d",
 			__func__, ret);
 		return ret;
 	}
 
 	dev_dbg(cvs->dev,
-		"%s:firmware_request() pass with name:%s, data:%p, size:%d\n",
-		__func__, cvs->fw_filename, cvs->file->data,
-		(int)cvs->file->size);
+		"%s: FW bin file found with file_ptr:%p, size:0x%x",
+		__func__, cvs->file->data, (int)cvs->file->size);
 
 	/* Alloc memory for FW Image Buffer */
 	cvs->fw_buffer_size = cvs->file->size;
 	cvs->fw_buffer =
 		devm_kzalloc(cvs->dev, cvs->fw_buffer_size, GFP_KERNEL);
 	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
-		dev_err(cvs->dev, "%s:NO memory for fw_buffer", __func__);
+		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);
 		status = -ENOMEM;
 		goto err_fw_release;
 	}
@@ -546,8 +514,7 @@ static bool evaluate_fw(void)
 
 	status = cvs_fw_parse();
 	if (status) {
-		dev_err(cvs->dev, "%s:cvs_fw_parse() fail with status:%d\n",
-			__func__, status);
+		dev_err(cvs->dev, "%s: FW bin file is invalid", __func__);
 		goto err_fw_release;
 	}
 
@@ -594,15 +561,19 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 	}
 	cvs->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;
 
-	if (!cvs_get_fwver_vid_pid() && cvs_search_fw_file()) {
-		dev_info(cvs->dev, "%s:FW file found", __func__);
+	if (!cvs_get_fwver_vid_pid()) {
+		dev_info(cvs->dev, "%s:Device FW version is %d.%d.%d.%d",
+			__func__, cvs->ver.major, cvs->ver.minor,
+			cvs->ver.hotfix, cvs->ver.build);
 		if (evaluate_fw()) {
-			dev_err(cvs->dev, "%s:FW file found is invalid",
+			dev_err(cvs->dev, "%s:FW file not found",
 				__func__);
 			goto err_exit;
 		}
-	} else {
-		dev_info(cvs->dev, "%s:FW file not found", __func__);
+	}
+	else {
+		dev_info(cvs->dev, "%s:I2C error. Not able to read vid/pid",
+			__func__);
 		goto err_exit;
 	}
 

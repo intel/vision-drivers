@@ -94,6 +94,25 @@ exit:
 	return HRTIMER_NORESTART;
 }
 
+static int find_oem_prod_id(acpi_handle handle, const char* method_name, unsigned long long* value)
+{
+	acpi_status status;
+
+	status = acpi_evaluate_integer(handle, (acpi_string)method_name,
+		NULL, value);
+
+	if (ACPI_FAILURE(status)) {
+		dev_err(cvs->dev, "%s: ACPI method %s not found",
+			__func__, method_name);
+		return status;
+	}
+
+	dev_info(cvs->dev,
+		"%s: ACPI method %s returned oem_prod_id:0x%llx",
+		__func__, method_name, *value);
+	return 0;
+}
+
 static int find_shared_i2c(acpi_handle handle, const char *method_name)
 {
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -215,6 +234,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 	icvs->i2c_shared = (find_shared_i2c(handle, "IICS") < 0) ? 0 : 1;
 
 	if (icvs->cap == ICVS_FULLCAP) {
+		find_oem_prod_id(handle, "OPID", &(icvs->oem_prod_id));
 		/* Start FW D/L task cvs_fw_dl_thread() */
 		mdelay(FW_PREPARE_MS);
 		cvs_release_camera_sensor_internal();
@@ -606,7 +626,10 @@ static int cvs_resume(struct device *dev)
 	if (val < 0) 
 		dev_err(icvs->dev, "%s: Failed to read gpio via usb bridge\n", __func__);
 
-	if (icvs->cap == ICVS_FULLCAP) {	
+	if (icvs->cap == ICVS_FULLCAP) {
+		icvs->fw_dl_task_finished = false;
+		icvs->close_fw_dl_task = false;
+
 		/* Restart IRQ and wdt, hrtimer_start would start by fw_dl_task */
 		enable_irq(icvs->irq);
 		schedule_work(&icvs->fw_dl_task);

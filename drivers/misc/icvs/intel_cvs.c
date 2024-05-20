@@ -144,7 +144,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		break;
 	default:
 		dev_err(icvs->dev, "Number of GPIOs not supported: %d\n", ret);
-		devm_kfree(icvs->dev, icvs);
+		devm_kfree(&i2c->dev, icvs);
 		ret = -EINVAL;
 		goto exit;
 	}
@@ -225,7 +225,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 	}
 exit:
 	if (ret)
-		devm_kfree(icvs->dev, icvs);
+		devm_kfree(&i2c->dev, icvs);
 
 	return ret;
 }

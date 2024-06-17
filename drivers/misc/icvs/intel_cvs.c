@@ -72,6 +72,9 @@ static void cvs_wdt_reset_thread(struct work_struct *work)
 
 	if (icvs->rst_retry--) {
 		icvs->owner = CVS_CAMERA_NONE;
+		icvs->ref_count = 0;
+		icvs->int_ref_count = 0;
+
 		msleep(RST_TIME);
 		gpiod_set_value_cansleep(icvs->rst, 1);
 		hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT),
@@ -267,7 +270,6 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 		dev_info(&i2c->dev, "%s\n", __func__);
 		icvs = i2c_get_clientdata(i2c);
 		if (icvs) {
-			release_firmware(cvs->file);
 			cvs->close_fw_dl_task = true;
 
 			while (cvs->ref_count) {
@@ -328,7 +330,7 @@ int cvs_acquire_camera_sensor_internal(void)
 	if (!cvs)
 		return -EINVAL;
 
-	if (cvs->icvs_state == CV_FW_DOWNLOADING_STATE)
+	if (cvs->icvs_state == CV_FW_DOWNLOADING_STATE || cvs->icvs_state == CV_FW_FLASHING_STATE)
 		return -EBUSY;
 
 	if (cvs->owner != CVS_CAMERA_IPU) {
@@ -341,6 +343,8 @@ int cvs_acquire_camera_sensor_internal(void)
 		if (val != 0)
 			goto err_out;
 	}
+
+	cvs->owner = CVS_CAMERA_IPU;
 	cvs->int_ref_count++;
 	return 0;
 
@@ -359,7 +363,10 @@ int cvs_release_camera_sensor_internal(void)
 	if (cvs->icvs_state == CV_FW_DOWNLOADING_STATE)
 		return -EBUSY;
 
-	if (cvs->owner != CVS_CAMERA_CVS) {
+	if (cvs->int_ref_count == 0)
+		return 0;
+
+	if (cvs->owner != CVS_CAMERA_CVS && cvs->int_ref_count == 1) {
 		do {
 			gpiod_set_value_cansleep(cvs->req, 1);
 			mdelay(GPIO_READ_DELAY_MS);
@@ -369,8 +376,12 @@ int cvs_release_camera_sensor_internal(void)
 		if (val != 1)
 			goto err_out;
 	}
+
 	cvs->int_ref_count--;
+	cvs->owner = (cvs->int_ref_count == 0) ? CVS_CAMERA_CVS :
+		CVS_CAMERA_IPU;
 	return 0;
+
 err_out:
 	dev_err(cvs->dev, "%s:error! val %d (!=1)\n", __func__, val);
 	return -EIO;
@@ -388,10 +399,7 @@ int cvs_acquire_camera_sensor(struct cvs_mipi_config *config,
 	ret = cvs_acquire_camera_sensor_internal();
 	if (!ret) {
 		spin_lock(&cvs->lock);
-		cvs->owner = (cvs->ref_count <= 0) ? CVS_CAMERA_IPU :
-						     cvs->owner;
-		cvs->ref_count = (cvs->ref_count <= 0) ? 1 :
-							 (cvs->ref_count + 1);
+		cvs->ref_count++;
 		spin_unlock(&cvs->lock);
 	}
 	return (ret) ? ret : 0;
@@ -408,10 +416,9 @@ int cvs_release_camera_sensor(struct cvs_camera_status *status)
 	ret = cvs_release_camera_sensor_internal();
 	if (!ret) {
 		spin_lock(&cvs->lock);
-		cvs->ref_count = (cvs->ref_count > 0) ? (cvs->ref_count - 1) :
-							0;
+		cvs->ref_count = (cvs->ref_count > 0) ? (cvs->ref_count - 1) : 0;
 		cvs->owner = (cvs->ref_count == 0) ? CVS_CAMERA_CVS :
-						     cvs->owner;
+					CVS_CAMERA_IPU;
 		spin_unlock(&cvs->lock);
 	}
 	return (ret) ? ret : 0;
@@ -419,22 +426,6 @@ int cvs_release_camera_sensor(struct cvs_camera_status *status)
 EXPORT_SYMBOL_GPL(cvs_release_camera_sensor);
 
 #ifdef DEBUG_CVS
-int cvs_get_state()
-{
-	if (!cvs)
-		return -EINVAL;
-
-	if (cvs_acquire_camera_sensor_internal())
-		return -EINVAL;
-
-	if (cvs_read_i2c(GET_DEVICE_STATE, (char *)&cvs->cvs_state,
-			 sizeof(char)) <= 0)
-		return -EIO;
-
-	cvs_release_camera_sensor_internal();
-	return 0;
-}
-
 int cvs_exec_cmd(enum cvs_command command)
 {
 	int rc;
@@ -448,6 +439,10 @@ int cvs_exec_cmd(enum cvs_command command)
 
 	switch (command) {
 	case GET_DEVICE_STATE:
+		if(cvs->icvs_state == CV_FW_FLASHING_STATE) {
+			dev_dbg(cvs->dev, "%s: Device Busy. State can't be queried now", __func__);
+			return -EBUSY;
+		}
 		rc = cvs_read_i2c(GET_DEVICE_STATE, (char *)&cvs->cvs_state,
 				  sizeof(char));
 		if (rc <= 0)
@@ -455,6 +450,11 @@ int cvs_exec_cmd(enum cvs_command command)
 		break;
 
 	case GET_FW_VERSION:
+		if(cvs->icvs_state == CV_FW_DOWNLOADING_STATE || cvs->icvs_state == CV_FW_FLASHING_STATE) {
+			dev_dbg(cvs->dev, "%s: Device Busy. Version can't be queried now", __func__);
+			return -EBUSY;
+		}
+		
 		rc = cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver,
 				  sizeof(struct cvs_fw));
 		if (rc <= 0)
@@ -462,6 +462,11 @@ int cvs_exec_cmd(enum cvs_command command)
 		break;
 
 	case GET_VID_PID:
+		if(cvs->icvs_state == CV_FW_DOWNLOADING_STATE || cvs->icvs_state == CV_FW_FLASHING_STATE) {
+			dev_dbg(cvs->dev, "%s: Device Busy. ID can't be queried now", __func__);
+			return -EBUSY;
+		}
+		
 		rc = cvs_read_i2c(GET_VID_PID, (char *)&cvs->id,
 				  sizeof(struct cvs_id));
 		if (rc <= 0)
@@ -481,7 +486,6 @@ int cvs_exec_cmd(enum cvs_command command)
 err_out:
 	if (cvs->i2c_shared && cvs->icvs_state != CV_FW_DOWNLOADING_STATE)
 		cvs_release_camera_sensor_internal();
-
 
 	pr_err("%s:CVs command 0x%x failed, cvs_read_i2c: %d\n", __func__,
 	       command, rc);
@@ -532,9 +536,10 @@ static ssize_t coredump_show(struct device *dev, struct device_attribute *attr,
 		cvs->ver.hotfix, cvs->ver.build, cvs->ver.major, cvs->ver.minor,
 		cvs->ver.hotfix, cvs->ver.build, cvs->cvs_state, stat_name,
 		cvs->ref_count, cvs->int_ref_count,
-		(cvs->owner == CVS_CAMERA_CVS) ?
-			"CVS" :
-			((cvs->owner == CVS_CAMERA_IPU) ? "IPU" : "none"),
+		((cvs->owner == CVS_CAMERA_NONE) ? "NONE" :
+		(cvs->owner == CVS_CAMERA_CVS)  ? "CVS" :
+		(cvs->owner == CVS_CAMERA_IPU && cvs->ref_count) ? "IPU" : 
+		(cvs->owner == CVS_CAMERA_IPU && cvs->int_ref_count) ? "VDRV" : "UNKNOWN"),
 		cvs->i2c_shared);
 }
 static DEVICE_ATTR_RO(coredump);
@@ -542,20 +547,16 @@ static DEVICE_ATTR_RO(coredump);
 static ssize_t cmd_store(struct device *dev, struct device_attribute *attr,
 			 const char *buf, size_t count)
 {
-	if (sysfs_streq(buf, "reset"))
-		schedule_work(&cvs->rst_task);
-	else if (sysfs_streq(buf, "acquire"))
+	if (sysfs_streq(buf, "acquire"))
 		cvs_acquire_camera_sensor(NULL, NULL, NULL, NULL);
 	else if (sysfs_streq(buf, "release"))
 		cvs_release_camera_sensor(NULL);
 	else if (sysfs_streq(buf, "state"))
-		cvs_get_state();
+		cvs_exec_cmd(GET_DEVICE_STATE);
 	else if (sysfs_streq(buf, "version"))
 		cvs_exec_cmd(GET_FW_VERSION);
 	else if (sysfs_streq(buf, "id"))
 		cvs_exec_cmd(GET_VID_PID);
-	else if (sysfs_streq(buf, "update"))
-		pr_err("%s:update not implemented\n", __func__);
 	else
 		pr_err("%s:invalid %s command\n", __func__, buf);
 
@@ -567,7 +568,7 @@ static ssize_t cmd_show(struct device *dev, struct device_attribute *attr,
 {
 	return sysfs_emit(
 		buf, "command: %s\n",
-		"[coredump, reset, acquire, release, state, version, id, update]");
+		"[coredump, acquire, release, state, version, id]");
 }
 static DEVICE_ATTR_RW(cmd);
 
@@ -587,6 +588,7 @@ static int cvs_suspend(struct device *dev)
 	int ret = 0; 
 	u64 timeout;
 
+	dev_info(icvs->dev, "%s entered\n", __func__);
 	/* Wait for FW update complete */
 	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {	
 		cvs->close_fw_dl_task = true;
@@ -601,6 +603,7 @@ static int cvs_suspend(struct device *dev)
 			ret = -EAGAIN;
 		}
 	}
+
 	if (icvs->cap == ICVS_FULLCAP) {	
 		/* Disable wdt & IRQ */
 		hrtimer_cancel(&icvs->wdt);
@@ -617,6 +620,7 @@ static int cvs_resume(struct device *dev)
 	struct intel_cvs *icvs = i2c_get_clientdata(i2c);
 	int val = -1, retry = FW_MAX_RETRY;
 
+	dev_info(icvs->dev, "%s entered\n", __func__);
 	/* Wait for bridge ready */
 	while (val < 0 && retry--) {
 		val = gpiod_get_value_cansleep(cvs->resp);

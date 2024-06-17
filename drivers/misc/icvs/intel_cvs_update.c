@@ -106,7 +106,7 @@ int cvs_get_dev_state(void)
 	}
 
 	if (ctx->i2c_shared) {
-		if (ctx->icvs_sensor_state != CV_SENSOR_IPU_ACQUIRED_STATE) {
+		if (ctx->icvs_sensor_state == CV_SENSOR_RELEASED_STATE) {
 			if (cvs_acquire_camera_sensor_internal()) {
 				dev_err(cvs->dev, "%s:Acquire sensor fail",__func__);
 				return -EIO;
@@ -293,6 +293,7 @@ int cvs_dev_fw_dl_end(void)
 
 	ctx->icvs_state = CV_FW_FLASHING_STATE;
 	status = cvs_get_device_state(&fw_state);
+	ctx->cv_fw_state = fw_state;
 	return status;
 }
 
@@ -351,6 +352,12 @@ int cvs_dev_fw_dl(void)
 
 	do {
 		status = cvs_wait_for_host_wake(ctx->max_flashtime_ms);
+		if (status) {
+			dev_err(cvs->dev, "%s: FW flash hostwake error",
+				__func__);
+			return -ETIMEDOUT;
+		}
+		ctx->icvs_state = CV_INIT_STATE;
 		status = cvs_get_dev_state();
 	} while ((!ctx->cv_fw_state) ||
 		 (ctx->cv_fw_state & DEVICE_DWNLD_BUSY_MASK));
@@ -434,6 +441,13 @@ static int cvs_fw_parse(void)
 		return -EINVAL;
 	}
 
+	if ((ptr_fw_header->vid_pid.vid != cvs->id.vid) ||
+		(ptr_fw_header->vid_pid.pid != cvs->id.pid)) {
+		dev_err(cvs->dev, "%s:dev & lib vid, pid mismatch",
+			__func__);
+		return -EINVAL;
+	}
+
 	dev_info(cvs->dev, "%s:Lib FW version is %d.%d.%d.%d",
 			__func__, ptr_fw_header->fw_ver.major,
 			ptr_fw_header->fw_ver.minor,
@@ -501,8 +515,8 @@ static bool evaluate_fw(void)
 		devm_kzalloc(cvs->dev, cvs->fw_buffer_size, GFP_KERNEL);
 	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
 		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);
-		status = -ENOMEM;
-		goto err_fw_release;
+		release_firmware(cvs->file);
+		return -ENOMEM;
 	}
 
 	dev_dbg(cvs->dev, "%s:fw_buff:%p size:0x%x, out_buf:%p",
@@ -513,15 +527,9 @@ static bool evaluate_fw(void)
 	wmb(); /* Flush WC buffers after writing fw_buffer */
 
 	status = cvs_fw_parse();
-	if (status) {
+	if (status)
 		dev_err(cvs->dev, "%s: FW bin file is invalid", __func__);
-		goto err_fw_release;
-	}
 
-	return 0;
-
-err_fw_release:
-	dev_err(cvs->dev, "%s:Calling release_firmware()\n", __func__);
 	release_firmware(cvs->file);
 	return status;
 }
@@ -555,7 +563,7 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 	ctx->fw_update_retries = CV_FW_DL_MAX_TRY_DEFAULT;
 
 	if (cvs->i2c_shared &&
-	    ctx->icvs_sensor_state != CV_SENSOR_IPU_ACQUIRED_STATE) {
+		ctx->icvs_sensor_state == CV_SENSOR_RELEASED_STATE) {
 		if (cvs_acquire_camera_sensor_internal())
 			goto err_exit;
 	}
@@ -565,6 +573,7 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 		dev_info(cvs->dev, "%s:Device FW version is %d.%d.%d.%d",
 			__func__, cvs->ver.major, cvs->ver.minor,
 			cvs->ver.hotfix, cvs->ver.build);
+
 		if (evaluate_fw()) {
 			dev_err(cvs->dev, "%s:FW file not found",
 				__func__);
@@ -572,7 +581,7 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 		}
 	}
 	else {
-		dev_info(cvs->dev, "%s:I2C error. Not able to read vid/pid",
+		dev_err(cvs->dev, "%s:I2C error. Not able to read vid/pid",
 			__func__);
 		goto err_exit;
 	}
@@ -597,9 +606,8 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 				goto err_exit;
 			}
 
-			if (ctx->icvs_sensor_state !=
-				    CV_SENSOR_IPU_ACQUIRED_STATE &&
-			    ctx->i2c_shared) {
+			if (ctx->icvs_sensor_state == CV_SENSOR_RELEASED_STATE &&
+					ctx->i2c_shared) {
 				status = cvs_acquire_camera_sensor_internal();
 				if (status) {
 					dev_err(cvs->dev,

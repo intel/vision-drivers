@@ -201,7 +201,6 @@ int cvs_release_camera_sensor(struct cvs_camera_status *status);
 #ifdef DEBUG_CVS
 int cvs_sysfs_dump(char *buf);
 int cvs_exec_cmd(enum cvs_command command);
-int cvs_get_state(void);
 #endif
 
 #endif // __INTEL_CVS_H__

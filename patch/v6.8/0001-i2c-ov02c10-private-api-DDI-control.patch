@@ -1,0 +1,116 @@
+From 04c553615a37a96b8916f07d7f2269ec3f2a851a Mon Sep 17 00:00:00 2001
+From: Jason Chen <jason.z.chen@intel.corp-partner.google.com>
+Date: Wed, 10 Jul 2024 19:27:09 +0800
+Subject: [PATCH] i2c: ov02c10: private api (DDI) control
+
+Currently, the vision driver architecture requires the sensor driver to
+pull a gpio pin to transfer ownership from CVS to IPU. This patch is
+addresses the current solution.
+
+Signed-off-by: Jason Chen <jason.z.chen@intel.corp-partner.google.com>
+---
+ drivers/media/i2c/ov02c10.c | 46 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+diff --git a/drivers/media/i2c/ov02c10.c b/drivers/media/i2c/ov02c10.c
+index 40865f8..01b2282 100644
+--- a/drivers/media/i2c/ov02c10.c
++++ b/drivers/media/i2c/ov02c10.c
+@@ -26,6 +26,15 @@ static const struct acpi_device_id cvfd_ids[] = {
+ };
+ #endif
+ 
++#if IS_ENABLED(CONFIG_INTEL_CVS)
++#include <linux/intel_cvs.h>
++
++static const struct acpi_device_id cvs_ids[] = {
++	{"INTC10DE", 0},
++	{}
++};
++#endif
++
+ #define OV02C10_LINK_FREQ_400MHZ	400000000ULL
+ #define OV02C10_SCLK			80000000LL
+ #define OV02C10_MCLK			19200000
+@@ -703,6 +712,11 @@ IS_ENABLED(CONFIG_INTEL_VSC)
+ 	struct vsc_camera_status status;
+ 	struct v4l2_ctrl *privacy_status;
+ #endif
++#if IS_ENABLED(CONFIG_INTEL_CVS)
++	struct cvs_mipi_config cvs_conf;
++	struct cvs_camera_status cvs_status;
++#endif
++
+ 	/* Current mode */
+ 	const struct ov02c10_mode *cur_mode;
+ 
+@@ -857,6 +871,7 @@ static int ov02c10_set_ctrl(struct v4l2_ctrl *ctrl)
+ 		ret = ov02c10_test_pattern(ov02c10, ctrl->val);
+ 		break;
+ 
++
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0) && \
+ IS_ENABLED(CONFIG_INTEL_VSC)
+ 	case V4L2_CID_PRIVACY:
+@@ -1173,6 +1188,13 @@ static void ov02c10_vsc_privacy_callback(void *handle,
+ }
+ #endif
+ 
++#if IS_ENABLED(CONFIG_INTEL_CVS)
++static void ov02c10_cvs_privacy_callback(void *handle,
++					enum cvs_privacy_status status)
++{
++}
++#endif
++
+ static int ov02c10_power_off(struct device *dev)
+ {
+ 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+@@ -1189,6 +1211,13 @@ IS_ENABLED(CONFIG_INTEL_VSC)
+ 		return ret;
+ 	}
+ #endif
++
++#if IS_ENABLED(CONFIG_INTEL_CVS)
++	ret = cvs_release_camera_sensor(&ov02c10->cvs_status);
++	if (ret && ret != -EAGAIN)
++		dev_err(dev, "Release CVS failed");
++	return ret;
++#endif
+ 	gpiod_set_value_cansleep(ov02c10->reset, 1);
+ 	gpiod_set_value_cansleep(ov02c10->handshake, 0);
+ 
+@@ -1206,6 +1235,7 @@ static int ov02c10_power_on(struct device *dev)
+ 	struct ov02c10 *ov02c10 = to_ov02c10(sd);
+ 	int ret;
+ 
++	dev_err(dev,"XXXX ov02c check");
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0) && \
+ IS_ENABLED(CONFIG_INTEL_VSC)
+ 	if (ov02c10->use_intel_vsc) {
+@@ -1228,6 +1258,22 @@ IS_ENABLED(CONFIG_INTEL_VSC)
+ 		return ret;
+ 	}
+ #endif
++
++#if IS_ENABLED(CONFIG_INTEL_CVS)
++	ov02c10->mipi_lanes = OV02C10_DATA_LANES;
++	ov02c10->cvs_conf.lane_num = ov02c10->mipi_lanes;
++	ov02c10->cvs_conf.freq=OV02C10_LINK_FREQ_400MHZ / 100000;
++	ret = cvs_acquire_camera_sensor(&ov02c10->cvs_conf,
++					ov02c10_cvs_privacy_callback,
++					ov02c10, &ov02c10->cvs_status);
++	if (ret == -EAGAIN) {
++		return -EPROBE_DEFER;
++	} else if (ret) {
++		dev_err(dev, "Acquire CVS failed");
++		return ret;
++	}
++#endif
++
+ 	ret = clk_prepare_enable(ov02c10->img_clk);
+ 	if (ret < 0) {
+ 		dev_err(dev, "failed to enable imaging clock: %d", ret);
+-- 
+2.34.1
+

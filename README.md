@@ -11,7 +11,8 @@ This repository supports Intel Vision Driver on Intel Lunar Lake (LNL) CVS-enabl
 ## Build instructions
 Ways to build the USBIO drivers
   1. build out of kernel source tree 
-  2. build with kernel source tree and build with dkms aren't supported yet
+  2. build with dkms
+  3. build with kernel source tree aren't supported yet
 
 Build was tested on Ubuntu 22.04 LNL CVS platform running kernel v6.7-rc8
 
@@ -42,5 +43,9 @@ $ sudo insmod intel_cvs.ko
 ```
 $ sudo rmmod intel_cvs
 ```
+
+### Build with dkms
+a dkms.conf file is also provided as an example for building with dkms which can be used by ```dkms add, build and install```.
+
 
 

@@ -25,13 +25,8 @@ static irqreturn_t cvs_irq_handler(int irq, void *devid)
 	if (!icvs || !icvs->dev)
 		goto exit;
 
-	icvs->rst_retry = RST_RETRY;
 	icvs->hostwake_event_arg = 1;
 	wake_up_interruptible(&icvs->hostwake_event);
-
-	if (icvs->fw_dl_task_finished == true)
-		hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT),
-			      HRTIMER_MODE_REL);
 	ret = true;
 exit:
 	return IRQ_RETVAL(ret);
@@ -54,47 +49,8 @@ static int cvs_init(struct intel_cvs *icvs)
 		goto exit;
 	}
 
-	icvs->rst_retry = RST_RETRY;
-
 exit:
 	return ret;
-}
-
-static void cvs_wdt_reset_thread(struct work_struct *work)
-{
-	struct intel_cvs *icvs = container_of(work, struct intel_cvs, rst_task);
-
-	if (!icvs)
-		return;
-
-	dev_info(icvs->dev, "%s\n", __func__);
-	gpiod_set_value_cansleep(icvs->rst, 0);
-
-	if (icvs->rst_retry--) {
-		icvs->owner = CVS_CAMERA_NONE;
-		icvs->ref_count = 0;
-		icvs->int_ref_count = 0;
-
-		msleep(RST_TIME);
-		gpiod_set_value_cansleep(icvs->rst, 1);
-		hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT),
-			      HRTIMER_MODE_REL);
-	} else
-		dev_err(icvs->dev, "%s:Device unresponsive!\n", __func__);
-}
-
-static enum hrtimer_restart cvs_wdt_reset(struct hrtimer *t)
-{
-	struct intel_cvs *icvs = container_of(t, struct intel_cvs, wdt);
-
-	if (!icvs)
-		goto exit;
-
-	dev_warn(icvs->dev, "%s\n", __func__);
-	schedule_work(&icvs->rst_task);
-
-exit:
-	return HRTIMER_NORESTART;
 }
 
 static int find_oem_prod_id(acpi_handle handle, const char* method_name, unsigned long long* value)
@@ -116,23 +72,24 @@ static int find_oem_prod_id(acpi_handle handle, const char* method_name, unsigne
 	return 0;
 }
 
-static int find_shared_i2c(acpi_handle handle, const char *method_name)
+static void find_shared_i2c(acpi_handle handle, const char *method_name, int *i2c_shared)
 {
-	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 	acpi_status status;
+	unsigned long long value = 0;
+	status = acpi_evaluate_integer(handle, (acpi_string)method_name,
+		NULL, &value);
 
-	status = acpi_evaluate_object(handle, (acpi_string)method_name, NULL,
-				      &buffer);
-	if (ACPI_FAILURE(status))
-		return -ENODEV;
-
-	if (!buffer.pointer)
-		return -ENODEV;
-
-	ACPI_FREE(buffer.pointer);
-	pr_info("%s:ACPI method %s found for i2c_shared\n", __func__,
-		method_name);
-	return 0;
+	if (ACPI_FAILURE(status)) {
+		dev_err(cvs->dev, "%s: ACPI method %s not found",
+			__func__, method_name);
+		*i2c_shared = 0;
+	}
+	
+	dev_info(cvs->dev,
+		"%s: ACPI method %s returned:0x%llx",
+		__func__, method_name, value);
+	
+	*i2c_shared = (value == 0) ? 0 : 1;
 }
 
 static int cvs_i2c_probe(struct i2c_client *i2c)
@@ -215,14 +172,10 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 			goto exit;
 		}
 
-		INIT_WORK(&icvs->rst_task, cvs_wdt_reset_thread);
 		INIT_WORK(&icvs->fw_dl_task, cvs_fw_dl_thread);
 		init_waitqueue_head(&icvs->hostwake_event);
 		init_waitqueue_head(&icvs->update_complete_event);
 		icvs->fw_dl_task_finished = false;
-
-		hrtimer_init(&icvs->wdt, CLOCK_REALTIME, HRTIMER_MODE_REL);
-		icvs->wdt.function = cvs_wdt_reset;
 
 		ret = cvs_init(icvs);
 		if (ret)
@@ -234,7 +187,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		dev_err(icvs->dev, "Failed to get ACPI handle\n");
 		goto exit;
 	}
-	icvs->i2c_shared = (find_shared_i2c(handle, "IICS") < 0) ? 0 : 1;
+	find_shared_i2c(handle, "IICS", &icvs->i2c_shared);
 
 	if (icvs->cap == ICVS_FULLCAP) {
 		find_oem_prod_id(handle, "OPID", &(icvs->oem_prod_id));
@@ -256,7 +209,6 @@ exit:
 static void cvs_exit(struct intel_cvs *icvs)
 {
 	if (icvs && icvs->dev && icvs->rst) {
-		hrtimer_cancel(&icvs->wdt);
 		devm_free_irq(icvs->dev, icvs->irq, icvs);
 		gpiod_set_value_cansleep(icvs->rst, 0);
 	}
@@ -271,12 +223,6 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 		icvs = i2c_get_clientdata(i2c);
 		if (icvs) {
 			cvs->close_fw_dl_task = true;
-
-			while (cvs->ref_count) {
-				pr_info("%s:Camera is used by IPU. check again after %dms",
-					__func__, WAIT_HOST_RELEASE_MS);
-				mdelay(WAIT_HOST_RELEASE_MS);
-			}
 
 			if (icvs->cap == ICVS_FULLCAP) {
 				if (!cvs->fw_dl_task_finished) {
@@ -387,44 +333,6 @@ err_out:
 	return -EIO;
 }
 
-int cvs_acquire_camera_sensor(struct cvs_mipi_config *config,
-			      cvs_privacy_callback_t callback, void *handle,
-			      struct cvs_camera_status *status)
-{
-	int ret;
-
-	if (!cvs)
-		return -EINVAL;
-
-	ret = cvs_acquire_camera_sensor_internal();
-	if (!ret) {
-		spin_lock(&cvs->lock);
-		cvs->ref_count++;
-		spin_unlock(&cvs->lock);
-	}
-	return (ret) ? ret : 0;
-}
-EXPORT_SYMBOL_GPL(cvs_acquire_camera_sensor);
-
-int cvs_release_camera_sensor(struct cvs_camera_status *status)
-{
-	int ret;
-
-	if (!cvs)
-		return -EINVAL;
-
-	ret = cvs_release_camera_sensor_internal();
-	if (!ret) {
-		spin_lock(&cvs->lock);
-		cvs->ref_count = (cvs->ref_count > 0) ? (cvs->ref_count - 1) : 0;
-		cvs->owner = (cvs->ref_count == 0) ? CVS_CAMERA_CVS :
-					CVS_CAMERA_IPU;
-		spin_unlock(&cvs->lock);
-	}
-	return (ret) ? ret : 0;
-}
-EXPORT_SYMBOL_GPL(cvs_release_camera_sensor);
-
 #ifdef DEBUG_CVS
 int cvs_exec_cmd(enum cvs_command command)
 {
@@ -529,17 +437,16 @@ static ssize_t coredump_show(struct device *dev, struct device_attribute *attr,
 		"CVS VID/PID     : 0x%x 0x%x\n"
 		"CVS Firmware Ver: %d.%d.%d.%d (0x%x.0x%x.0x%x.0x%x)\n"
 		"CVS Device State: 0x%x (%s)\n"
-		"Reference Count : %d (internal %d)\n"
+		"Reference Count : %d\n"
 		"CVS Owner       : %s\n"
 		"I2C Shared      : %d\n",
 		cvs->id.vid, cvs->id.pid, cvs->ver.major, cvs->ver.minor,
 		cvs->ver.hotfix, cvs->ver.build, cvs->ver.major, cvs->ver.minor,
 		cvs->ver.hotfix, cvs->ver.build, cvs->cvs_state, stat_name,
-		cvs->ref_count, cvs->int_ref_count,
+		cvs->int_ref_count,
 		((cvs->owner == CVS_CAMERA_NONE) ? "NONE" :
 		(cvs->owner == CVS_CAMERA_CVS)  ? "CVS" :
-		(cvs->owner == CVS_CAMERA_IPU && cvs->ref_count) ? "IPU" : 
-		(cvs->owner == CVS_CAMERA_IPU && cvs->int_ref_count) ? "VDRV" : "UNKNOWN"),
+		(cvs->owner == CVS_CAMERA_IPU) ? "HOST" : "UNKNOWN"),
 		cvs->i2c_shared);
 }
 static DEVICE_ATTR_RO(coredump);
@@ -547,11 +454,7 @@ static DEVICE_ATTR_RO(coredump);
 static ssize_t cmd_store(struct device *dev, struct device_attribute *attr,
 			 const char *buf, size_t count)
 {
-	if (sysfs_streq(buf, "acquire"))
-		cvs_acquire_camera_sensor(NULL, NULL, NULL, NULL);
-	else if (sysfs_streq(buf, "release"))
-		cvs_release_camera_sensor(NULL);
-	else if (sysfs_streq(buf, "state"))
+	if (sysfs_streq(buf, "state"))
 		cvs_exec_cmd(GET_DEVICE_STATE);
 	else if (sysfs_streq(buf, "version"))
 		cvs_exec_cmd(GET_FW_VERSION);
@@ -568,7 +471,7 @@ static ssize_t cmd_show(struct device *dev, struct device_attribute *attr,
 {
 	return sysfs_emit(
 		buf, "command: %s\n",
-		"[coredump, acquire, release, state, version, id]");
+		"[coredump, state, version, id]");
 }
 static DEVICE_ATTR_RW(cmd);
 
@@ -586,27 +489,20 @@ static int cvs_suspend(struct device *dev)
 	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
 	struct intel_cvs *icvs = i2c_get_clientdata(i2c);
 	int ret = 0; 
-	u64 timeout;
 
 	dev_info(icvs->dev, "%s entered\n", __func__);
-	/* Wait for FW update complete */
 	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {	
 		cvs->close_fw_dl_task = true;
 		cvs->hostwake_event_arg = 1;
 		wake_up_interruptible(&cvs->hostwake_event);
-		timeout = msecs_to_jiffies(WAIT_HOST_WAKE_FLASH_LONG_MS * FW_MAX_RETRY);
-		ret = wait_event_interruptible_timeout(cvs->update_complete_event,
-							cvs->update_complete_event_arg == 1,
-							timeout);
-		if (ret <= 0) {
-			dev_err(icvs->dev, "%s: Failed to wait FW update complete\n", __func__);
-			ret = -EAGAIN;
-		}
+		/* Wait for fw update to cancel */
+		dev_info(icvs->dev, "%s: wait for fw update cancel", __func__);
+		flush_work(&icvs->fw_dl_task);
+		dev_info(icvs->dev, "%s: fw update cancelled", __func__);
 	}
 
 	if (icvs->cap == ICVS_FULLCAP) {	
-		/* Disable wdt & IRQ */
-		hrtimer_cancel(&icvs->wdt);
+		/* Disable IRQ */
 		disable_irq(icvs->irq);
 	}
 
@@ -634,7 +530,7 @@ static int cvs_resume(struct device *dev)
 		icvs->fw_dl_task_finished = false;
 		icvs->close_fw_dl_task = false;
 
-		/* Restart IRQ and wdt, hrtimer_start would start by fw_dl_task */
+		/* Restart IRQ & fw_dl thread */
 		enable_irq(icvs->irq);
 		schedule_work(&icvs->fw_dl_task);
 	}

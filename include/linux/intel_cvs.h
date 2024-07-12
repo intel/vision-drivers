@@ -13,7 +13,6 @@
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
-#include <linux/hrtimer.h>
 #include <linux/i2c.h>
 #include <linux/workqueue.h>
 
@@ -92,16 +91,6 @@ enum icvs_state {
 	CV_STOPPING = (1 << 7)
 };
 
-struct cvs_mipi_config {
-	u32 freq;
-	u32 lane_num;
-};
-
-enum cvs_privacy_status {
-	CVS_PRIVACY_ON = 0,
-	CVS_PRIVACY_OFF,
-};
-
 enum cvs_camera_owner {
 	CVS_CAMERA_NONE = 0,
 	CVS_CAMERA_CVS,
@@ -146,10 +135,6 @@ struct intel_cvs {
 	struct gpio_desc *req;
 	struct gpio_desc *resp;
 
-	int rst_retry;
-	struct hrtimer wdt;
-	struct work_struct rst_task;
-
 	/* CVS Status */
 	struct cvs_id id;
 	struct cvs_fw ver;
@@ -160,7 +145,6 @@ struct intel_cvs {
 	int i2c_shared;
 	unsigned long long oem_prod_id;
 	enum cvs_camera_owner owner;
-	int ref_count;
 	int int_ref_count;
 
 	/* FW update info */
@@ -183,20 +167,6 @@ struct intel_cvs {
 	int hostwake_event_arg;
 	int update_complete_event_arg;
 };
-
-struct cvs_camera_status {
-	enum cvs_camera_owner owner;
-	enum cvs_privacy_status status;
-	u32 exposure_level;
-};
-typedef void (*cvs_privacy_callback_t)(void *handle,
-					enum cvs_privacy_status status);
-
-int cvs_acquire_camera_sensor(struct cvs_mipi_config *config,
-				cvs_privacy_callback_t callback,
-				void *handle,
-				struct cvs_camera_status *status);
-int cvs_release_camera_sensor(struct cvs_camera_status *status);
 
 #ifdef DEBUG_CVS
 int cvs_sysfs_dump(char *buf);

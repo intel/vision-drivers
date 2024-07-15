@@ -68,19 +68,8 @@ static void cvs_wdt_reset_thread(struct work_struct *work)
 		return;
 
 	dev_info(icvs->dev, "%s\n", __func__);
-	gpiod_set_value_cansleep(icvs->rst, 0);
 
-	if (icvs->rst_retry--) {
-		icvs->owner = CVS_CAMERA_NONE;
-		icvs->ref_count = 0;
-		icvs->int_ref_count = 0;
-
-		msleep(RST_TIME);
-		gpiod_set_value_cansleep(icvs->rst, 1);
-		hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT),
-			      HRTIMER_MODE_REL);
-	} else
-		dev_err(icvs->dev, "%s:Device unresponsive!\n", __func__);
+	hrtimer_start(&icvs->wdt, ms_to_ktime(WDT_TIMEOUT), HRTIMER_MODE_REL);
 }
 
 static enum hrtimer_restart cvs_wdt_reset(struct hrtimer *t)
@@ -197,7 +186,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 
 	if (icvs->cap == ICVS_FULLCAP) {
 		/* Reset GPIO */
-		icvs->rst = devm_gpiod_get(icvs->dev, "rst", GPIOD_OUT_LOW);
+		icvs->rst = devm_gpiod_get(icvs->dev, "rst", GPIOD_OUT_HIGH);
 		if (IS_ERR(icvs->rst)) {
 			dev_err(icvs->dev, "Failed to get RESET gpiod\n");
 			ret = -EIO;
@@ -240,9 +229,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		find_oem_prod_id(handle, "OPID", &(icvs->oem_prod_id));
 		/* Start FW D/L task cvs_fw_dl_thread() */
 		mdelay(FW_PREPARE_MS);
-		cvs_release_camera_sensor_internal();
 		mdelay(FW_PREPARE_MS);
-		cvs_reset_cv_device();
 		mdelay(FW_PREPARE_MS);
 		schedule_work(&icvs->fw_dl_task);
 	}
@@ -690,6 +677,7 @@ static void __exit icvs_exit(void)
 module_exit(icvs_exit);
 
 MODULE_AUTHOR("Lifu Wang <lifu.wang@intel.com>");
+MODULE_AUTHOR("Yeh, Sata <sata.yeh@intel.com>");
 MODULE_AUTHOR("Israel Cepeda <israel.a.cepeda.lopez@intel.com>");
 MODULE_AUTHOR("Hemanth Rachakonda <hemanth.rachakonda@intel.com>");
 MODULE_AUTHOR("Srinivas Alla <alla.srinivas@intel.com>");

@@ -193,10 +193,6 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		find_oem_prod_id(handle, "OPID", &(icvs->oem_prod_id));
 		/* Start FW D/L task cvs_fw_dl_thread() */
 		mdelay(FW_PREPARE_MS);
-		cvs_release_camera_sensor_internal();
-		mdelay(FW_PREPARE_MS);
-		cvs_reset_cv_device();
-		mdelay(FW_PREPARE_MS);
 		schedule_work(&icvs->fw_dl_task);
 	}
 exit:

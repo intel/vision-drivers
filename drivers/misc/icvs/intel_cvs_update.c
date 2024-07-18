@@ -88,7 +88,7 @@ int cvs_reset_cv_device(void)
 	gpiod_set_value_cansleep(cvs->rst, 0);
 	mdelay(GPIO_RESET_MS);
 	gpiod_set_value_cansleep(cvs->rst, 1);
-	mdelay(GPIO_RESET_MS);
+	mdelay(FW_PREPARE_MS);
 	return 0;
 }
 

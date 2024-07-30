@@ -1,7 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- * SPDX-License-Identifier: GPL-2.0
- *
- * Intel Computer Vision System driver
  *
  * Copyright (C) 2024 Intel Corporation.
  *
@@ -19,15 +17,15 @@
 #define DEBUG_CVS
 
 /* ICVS # of GPIOs */
-#define ICVS_FULL	4
-#define ICVS_LIGHT	2
+#define ICVS_FULL 4
+#define ICVS_LIGHT 2
 
 /* WDT timeout in ms */
-#define WDT_TIMEOUT	5000
+#define WDT_TIMEOUT 5000
 
 /* RESET values */
-#define RST_TIME	100
-#define RST_RETRY	5
+#define RST_TIME 100
+#define RST_RETRY 5
 
 #define GPIO_READ_DELAY_MS 100
 #define GPIO_WRITE_DELAY_MS 100
@@ -44,14 +42,13 @@
 #define WAIT_NORMAL_MS 500
 #define WAIT_HOST_WAKE_FLASH_LONG_MS 200000L
 #define MAGICNUMSIZE 8
-#define MAGICNUM { 'V', 'I', 'S', 'S', 'O', 'C', 'F', 'W' }
+#define MAGICNUM                                       \
+	{                                              \
+		'V', 'I', 'S', 'S', 'O', 'C', 'F', 'W' \
+	}
 
 /* ICVS capability */
-enum icvs_cap {
-	ICVS_NOTSUP = 0,
-	ICVS_LIGHTCAP,
-	ICVS_FULLCAP
-};
+enum icvs_cap { ICVS_NOTSUP = 0, ICVS_LIGHTCAP, ICVS_FULLCAP };
 
 /* Supported commands by CV SoC */
 enum cvs_command {
@@ -118,9 +115,8 @@ struct cvs_fw_header {
 	u32 fw_offset;
 	/* pad with 0 */
 	u8 reserved[256 - sizeof(u8) * 8 /*magic_number*/ -
-		sizeof(struct cvs_fw) - sizeof(struct cvs_id) -
-		sizeof(u32) /*fw_offset*/ -
-		sizeof(u32) /*header_checksum*/];
+		    sizeof(struct cvs_fw) - sizeof(struct cvs_id) -
+		    sizeof(u32) /*fw_offset*/ - sizeof(u32) /*header_checksum*/];
 	/* 4bytes CRC checksum of the header, not include this header_checksum itself */
 	u32 header_checksum;
 };
@@ -128,7 +124,6 @@ struct cvs_fw_header {
 struct intel_cvs {
 	struct device *dev;
 	enum icvs_cap cap;
-	spinlock_t lock;
 
 	int irq;
 	struct gpio_desc *rst;
@@ -151,10 +146,10 @@ struct intel_cvs {
 	u8 in_buf[I2C_PKT_SIZE];
 	u8 out_buf[I2C_PKT_SIZE];
 	struct work_struct fw_dl_task;
-	const struct firmware* file;
+	const struct firmware *file;
 	u32 fw_update_retries;
 	u32 fw_file_path[_MAX_PATH];
-	void* fw_buffer;
+	void *fw_buffer;
 	u32 fw_buffer_size;
 	u32 max_flashtime_ms;
 	u8 cv_fw_state;

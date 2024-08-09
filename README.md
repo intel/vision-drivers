@@ -25,7 +25,6 @@ $ sudo apt-get install build-essential
 To compile the Intel Vision driver:
 ```
 $ cd vision-drivers
-$ make clean
 $ make
 ```
 

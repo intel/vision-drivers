@@ -55,6 +55,7 @@ enum cvs_command {
 	GET_DEVICE_STATE = 0x0800,
 	GET_FW_VERSION = 0x0801,
 	GET_VID_PID = 0x0802,
+	SET_HOST_IDENTIFIER = 0x0805,
 	FW_LOADER_START = 0x0820,
 	FW_LOADER_DATA = 0x0821,
 	FW_LOADER_END = 0x0822,
@@ -92,6 +93,17 @@ enum cvs_camera_owner {
 	CVS_CAMERA_NONE = 0,
 	CVS_CAMERA_CVS,
 	CVS_CAMERA_IPU,
+};
+
+union cv_host_identifiers{
+	u32      value;
+	struct {
+		u32      Reserved : 27;
+		u32      VisionSensing : 1;
+		u32      DevicePowerSetting : 2;
+		u32      PrivacyLedHost : 1;
+		u32      rgbCameraPwrUpHost : 1;
+	} field;
 };
 
 /* CV-returned data from i2c */
@@ -136,6 +148,7 @@ struct intel_cvs {
 	enum cvs_state cvs_state;
 	enum icvs_state icvs_state;
 	enum icvs_sensor_state icvs_sensor_state;
+	union cv_host_identifiers host_identifiers;
 
 	int i2c_shared;
 	unsigned long long oem_prod_id;

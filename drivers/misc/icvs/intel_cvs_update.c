@@ -12,6 +12,7 @@ extern struct intel_cvs *cvs;
 
 int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 {
+	struct intel_cvs *ctx = cvs;
 	struct i2c_client *client =
 		container_of(cvs->dev, struct i2c_client, dev);
 	int count;
@@ -35,6 +36,30 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		mdelay(GPIO_WRITE_DELAY_MS);
 		if (count != sizeof(u16))
 			return -EIO;
+		break;
+	case SET_HOST_IDENTIFIER:
+		u8 *out_buff;
+
+		out_buff = devm_kzalloc(ctx->dev, (sizeof(union cv_host_identifiers) + sizeof(cmd)), GFP_KERNEL);
+		if (!out_buff) {
+			dev_err(cvs->dev, "%s:Failed to allocate memory for buffer", __func__);
+			return -ENOMEM;
+		}
+		out_buff[0] = (cmd >> 8) & 0x00ff;
+		out_buff[1] = cmd & 0x00ff;
+		ctx->host_identifiers.field.VisionSensing = 0;
+		ctx->host_identifiers.field.DevicePowerSetting = 0;
+		ctx->host_identifiers.field.PrivacyLedHost = 1;
+		ctx->host_identifiers.field.rgbCameraPwrUpHost = 1;
+
+		memcpy(&out_buff[2], &ctx->host_identifiers.value, sizeof(union cv_host_identifiers));
+
+		count = i2c_master_send(client, (const char *) out_buff,
+					sizeof(cmd)+sizeof(union cv_host_identifiers));
+
+		if (count != sizeof(union cv_host_identifiers) + sizeof(cmd))
+			return -EIO;
+		dev_dbg(cvs->dev, "%s: SET_HOST_IDENTIFIER SUCCESS", __func__);
 		break;
 	default:
 		dev_err(cvs->dev, "%s:Invalid command type", __func__);

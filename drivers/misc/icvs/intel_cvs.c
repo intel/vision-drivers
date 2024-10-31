@@ -188,6 +188,11 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 
 	if (icvs->cap == ICVS_FULLCAP) {
 		find_oem_prod_id(handle, "OPID", &icvs->oem_prod_id);
+		if (!icvs->i2c_shared)
+			if (cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0)) {
+				dev_err(cvs->dev, "%s:cvs_write_i2c() set_host_identifiers failed",
+					__func__);
+			}
 		/* Start FW D/L task cvs_fw_dl_thread() */
 		mdelay(FW_PREPARE_MS);
 		schedule_work(&icvs->fw_dl_task);

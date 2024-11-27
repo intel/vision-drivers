@@ -247,8 +247,16 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 
 int cvs_read_i2c(u16 cmd, char *data, int size)
 {
+	struct intel_cvs *ctx = cvs;
 	struct i2c_client *i2c = container_of(cvs->dev, struct i2c_client, dev);
 	int cnt;
+	char *in_data;
+
+	in_data = devm_kzalloc(ctx->dev, (CVMAGICNUMSIZE + size), GFP_KERNEL);
+	if (!in_data) {
+		dev_err(cvs->dev, "%s:Failed to allocate memory for buffer", __func__);
+		return -ENOMEM;
+	}
 	u16 cvs_cmd = (((cmd) >> 8) & 0x00ff) | (((cmd) << 8) & 0xff00);
 
 	if (size < 0 || !data)
@@ -261,7 +269,22 @@ int cvs_read_i2c(u16 cmd, char *data, int size)
 		return -EIO;
 	}
 
-	cnt = i2c_master_recv(i2c, (char *)data, size);
+	if (ctx->magic_num_support) {
+		cnt = i2c_master_recv(i2c, in_data, size + CVMAGICNUMSIZE);
+		ctx->magic_num_received = ((u32 *)in_data)[0];
+
+		if (ctx->magic_num_received ==  CVMAGICNUM) {
+			dev_dbg(&i2c->dev, "%s:Verified Magic number",
+				 __func__);
+			memcpy(data, in_data + CVMAGICNUMSIZE, size);
+		} else {
+			dev_dbg(&i2c->dev, "%s:Invalid Magic number",
+				__func__);
+			return -EIO;
+		}
+	} else
+		cnt = i2c_master_recv(i2c, (char *)data, size);
+
 	return cnt;
 }
 

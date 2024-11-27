@@ -9,6 +9,9 @@
 #include <linux/intel_cvs.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
+#include <linux/sysfs.h>
+#include <linux/fs.h>
+#include <linux/file.h>
 
 #include "cvs_gpio.h"
 #include "intel_cvs_update.h"
@@ -126,8 +129,8 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 	}
 
 	ret = devm_acpi_dev_add_driver_gpios(icvs->dev,
-										 icvs->cap == ICVS_FULLCAP ?
-										 icvs_acpi_gpios : icvs_acpi_lgpios);
+			icvs->cap == ICVS_FULLCAP ?
+			icvs_acpi_gpios : icvs_acpi_lgpios);
 	if (ret) {
 		dev_err(icvs->dev, "Failed to add driver gpios");
 		goto exit;
@@ -172,6 +175,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		INIT_WORK(&icvs->fw_dl_task, cvs_fw_dl_thread);
 		init_waitqueue_head(&icvs->hostwake_event);
 		init_waitqueue_head(&icvs->update_complete_event);
+		init_waitqueue_head(&icvs->lvfs_fwdl_complete_event);
 		icvs->fw_dl_task_finished = false;
 
 		ret = cvs_init(icvs);
@@ -193,9 +197,40 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 				dev_err(cvs->dev, "%s:cvs_write_i2c() set_host_identifiers failed",
 					__func__);
 			}
-		/* Start FW D/L task cvs_fw_dl_thread() */
 		mdelay(FW_PREPARE_MS);
-		schedule_work(&icvs->fw_dl_task);
+		if (icvs->icvs_sensor_state == CV_SENSOR_RELEASED_STATE) {
+			if (cvs_acquire_camera_sensor_internal()) {
+				dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
+				goto exit;
+			} else {
+				dev_info(cvs->dev, "%s:Transfer of ownership success",
+						 __func__);
+			}
+		}
+		icvs->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;
+
+		ret = cvs_get_fwver_vid_pid();
+		if (!ret) {
+			dev_info(cvs->dev, "%s:Device fw version is %d.%d.%d.%d",
+					 __func__, cvs->ver.major, cvs->ver.minor,
+					 cvs->ver.hotfix, cvs->ver.build);
+		} else {
+			dev_err(cvs->dev, "%s:I2C error. Not able to read vid/pid",
+					__func__);
+			goto exit;
+		}
+
+		/* Device FW version */
+		cvs->cvs_to_plugin.major = cvs->ver.major;
+		cvs->cvs_to_plugin.minor = cvs->ver.minor;
+		cvs->cvs_to_plugin.hotfix = cvs->ver.hotfix;
+		cvs->cvs_to_plugin.build = cvs->ver.build;
+
+		/* Device vid,pid */
+		cvs->cvs_to_plugin.vid = cvs->id.vid;
+		cvs->cvs_to_plugin.pid = cvs->id.pid;
+		cvs->cvs_to_plugin.opid = icvs->oem_prod_id;
+		cvs->cvs_to_plugin.dev_capabilities = 0;//TBD
 	}
 exit:
 	if (ret)
@@ -221,7 +256,7 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 			cvs->close_fw_dl_task = true;
 
 			if (icvs->cap == ICVS_FULLCAP) {
-				if (!cvs->fw_dl_task_finished) {
+				if (cvs->fw_dl_task_started && !cvs->fw_dl_task_finished) {
 					dev_info(cvs->dev,
 							 "%s:signal cvs_fw_dl_thread() to stop",
 							 __func__);
@@ -232,7 +267,7 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 							 "%s:Wait for cvs_fw_dl_thread() to stop",
 							 __func__);
 					wait_event_interruptible(cvs->update_complete_event,
-											 cvs->update_complete_event_arg == 1);
+						cvs->update_complete_event_arg == 1);
 					dev_info(cvs->dev,
 							 "%s:cvs_fw_dl_thread() stopped",
 							 __func__);
@@ -282,8 +317,9 @@ int cvs_read_i2c(u16 cmd, char *data, int size)
 				__func__);
 			return -EIO;
 		}
-	} else
+	} else {
 		cnt = i2c_master_recv(i2c, (char *)data, size);
+	}
 
 	return cnt;
 }
@@ -502,14 +538,166 @@ static ssize_t cmd_show(struct device *dev, struct device_attribute *attr,
 			  "[coredump, state, version, id]");
 }
 static DEVICE_ATTR_RW(cmd);
+#endif //DEBUG_CVS
+
+static ssize_t cvs_ctrl_data_pre_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	int rc, count;
+
+	if (!buf) {
+		dev_err(cvs->dev, "%s: buff is null", __func__);
+		return -EINVAL;
+	}
+
+	count = sizeof(struct cvs_to_plugin_interface);
+	memset(&cvs->info_fwupd, 0, sizeof(struct ctrl_data_fwupd));
+	cvs->fw_dl_task_finished = 0;
+	cvs->fw_dl_task_started = 0;
+
+	dev_dbg(cvs->dev, "%s: Enter to read with buf:%p",
+			__func__, buf);
+
+	rc = cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver,
+		sizeof(struct cvs_fw));
+	if (rc <= 0) {
+		dev_err(cvs->dev, "%s: Get device fw version failed",
+				__func__);
+		return -EIO;
+	}
+	cvs->cvs_to_plugin.major = cvs->ver.major;
+	cvs->cvs_to_plugin.minor = cvs->ver.minor;
+	cvs->cvs_to_plugin.hotfix = cvs->ver.hotfix;
+	cvs->cvs_to_plugin.build = cvs->ver.build;
+
+	spin_lock_irqsave(&cvs->buffer_lock, flags);
+	memcpy(buf, &cvs->cvs_to_plugin, sizeof(struct cvs_to_plugin_interface));
+	spin_unlock_irqrestore(&cvs->buffer_lock, flags);
+
+	dev_dbg(cvs->dev, "%s: Exit", __func__);
+	return count;
+}
+
+static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned long flags;
+	struct file *f;
+	int fw_bin_size;
+	ssize_t bytes_read = 0;
+
+	if (!buf) {
+		dev_err(cvs->dev, "%s: buff is null", __func__);
+		return -EINVAL;
+	}
+
+	if (count == 0 || count != sizeof(struct plugin_to_cvs_interface)) {
+		dev_err(cvs->dev, "%s: Wrong count:%x",
+				__func__, (unsigned int)count);
+		return -EINVAL;
+	}
+
+	dev_dbg(cvs->dev, "%s: Enter with buf:%p, count:%x",
+			__func__, buf, (unsigned int)count);
+
+	spin_lock_irqsave(&cvs->buffer_lock, flags);
+	memcpy(&cvs->plugin_to_cvs, buf, count);
+	spin_unlock_irqrestore(&cvs->buffer_lock, flags);
+
+	dev_dbg(cvs->dev, "%s:dl_time:%x, fl_time:%x, retry_cnt:%x, fw_bin_fd:%x",
+			__func__, cvs->plugin_to_cvs.max_download_time,
+			cvs->plugin_to_cvs.max_flash_time,
+			cvs->plugin_to_cvs.max_fwupd_retry_count,
+			cvs->plugin_to_cvs.fw_bin_fd);
+
+	/* Get the file structure from the file descriptor */
+	f = fget(cvs->plugin_to_cvs.fw_bin_fd);
+	if (!f) {
+		dev_err(cvs->dev, "%s: Bad file descriptor", __func__);
+		return -EBADF;
+	}
+
+	fw_bin_size = generic_file_llseek(f, 0, SEEK_END);
+	dev_dbg(cvs->dev, "%s: Calculated fw_bin size:%x bytes",
+			__func__, fw_bin_size);
+	generic_file_llseek(f, -fw_bin_size, SEEK_CUR);
+
+	cvs->fw_buffer_size = fw_bin_size;
+	cvs->max_flashtime_ms = cvs->plugin_to_cvs.max_flash_time;
+	cvs->fw_update_retries = cvs->plugin_to_cvs.max_fwupd_retry_count;
+	cvs->fw_buffer = devm_kzalloc(cvs->dev, cvs->fw_buffer_size, GFP_KERNEL);
+
+	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
+		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);
+		return -ENOMEM;
+	}
+	dev_dbg(cvs->dev, "%s: fw_buffer allocated at:%p",
+			__func__, cvs->fw_buffer);
+	dev_dbg(cvs->dev, "%s: Copy fw binary using file_descriptor", __func__);
+	/* Read FW binary using file descriptor */
+	bytes_read = kernel_read(f, cvs->fw_buffer, cvs->fw_buffer_size,
+							&f->f_pos);
+	fput(f);
+	if (bytes_read != cvs->fw_buffer_size) {
+		dev_err(cvs->dev, "%s: kernel_read failed with bytes_read:%lx",
+				__func__, bytes_read);
+		return -EIO;
+	} else {
+		dev_info(cvs->dev, "%s: Full fw_buffer received. Start fw_download",
+				__func__);
+		schedule_work(&cvs->fw_dl_task);
+		cvs->fw_dl_task_started = true;
+	}
+
+	dev_dbg(cvs->dev, "%s: Exit", __func__);
+	return count;
+}
+
+static ssize_t cvs_ctrl_data_fwupd_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	unsigned int count = sizeof(struct ctrl_data_fwupd);
+
+	if (!buf) {
+		dev_err(cvs->dev, "%s: buff is null", __func__);
+		return -EINVAL;
+	}
+	dev_dbg(cvs->dev, "%s: Enter to read with buf:%p count;%x",
+		__func__, buf, count);
+
+	cvs->info_fwupd.fw_dl_finshed = cvs->fw_dl_task_finished;
+	cvs->info_fwupd.dev_state     = cvs->cv_fw_state;
+	cvs->info_fwupd.fw_upd_retries = cvs->fw_update_retries;
+
+	spin_lock_irqsave(&cvs->buffer_lock, flags);
+	memcpy(buf, &cvs->info_fwupd, count);
+	spin_unlock_irqrestore(&cvs->buffer_lock, flags);
+
+	if (cvs->info_fwupd.total_packets == cvs->info_fwupd.num_packets_sent) {
+		cvs->info_fwupd.fw_dl_finshed = 1;
+		cvs->lvfs_fwdl_complete_event_arg = 1;
+		wake_up_interruptible(&cvs->lvfs_fwdl_complete_event);
+	}
+
+	dev_dbg(cvs->dev, "%s: Exit", __func__);
+	return count;
+}
+
+static DEVICE_ATTR_RW(cvs_ctrl_data_pre);
+static DEVICE_ATTR_RO(cvs_ctrl_data_fwupd);
 
 static struct attribute *cvs_attrs[] = {
+#ifdef DEBUG_CVS
 	&dev_attr_coredump.attr,
 	&dev_attr_cmd.attr,
+#endif
+	&dev_attr_cvs_ctrl_data_pre.attr,
+	&dev_attr_cvs_ctrl_data_fwupd.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(cvs);
-#endif
 
 #ifdef CONFIG_PM
 static int cvs_suspend(struct device *dev)
@@ -519,7 +707,8 @@ static int cvs_suspend(struct device *dev)
 	int ret = 0;
 
 	dev_info(icvs->dev, "%s entered\n", __func__);
-	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {	
+	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {
+		icvs->cv_suspend = true;
 		cvs->close_fw_dl_task = true;
 		cvs->hostwake_event_arg = 1;
 		wake_up_interruptible(&cvs->hostwake_event);
@@ -557,11 +746,21 @@ static int cvs_resume(struct device *dev)
 
 	if (icvs->cap == ICVS_FULLCAP) {
 		icvs->fw_dl_task_finished = false;
+		icvs->cv_suspend = false;
 		icvs->close_fw_dl_task = false;
 
-		/* Restart IRQ & fw_dl thread */
+		/* Start IRQ */
 		enable_irq(icvs->irq);
+
+		/* Start FW D/L task cvs_fw_dl_thread() */
+		mdelay(FW_PREPARE_MS);
+		cvs_release_camera_sensor_internal();
+		icvs->icvs_sensor_state = CV_SENSOR_RELEASED_STATE;
+		mdelay(FW_PREPARE_MS);
+		cvs_reset_cv_device();
+		mdelay(FW_PREPARE_MS);
 		schedule_work(&icvs->fw_dl_task);
+		cvs->fw_dl_task_started = true;
 	}
 
 	dev_info(icvs->dev, "%s completed\n", __func__);

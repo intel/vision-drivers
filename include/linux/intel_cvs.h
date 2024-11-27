@@ -158,6 +158,40 @@ struct cvs_fw_header {
 	u32 header_checksum;
 };
 
+/* Params updated by vision driver */
+struct cvs_to_plugin_interface {
+	/* Device FW Version */
+	u32 major;
+	u32 minor;
+	u32 hotfix;
+	u32 build;
+	/* Device vid,pid */
+	u16 vid;
+	u16 pid;
+	int opid;
+	int dev_capabilities;
+};
+
+/* Params updated by CVS plugin */
+struct plugin_to_cvs_interface {
+	int max_download_time; /*milli sec*/
+	int max_flash_time; /*milli sec*/
+	int max_fwupd_retry_count;
+	int fw_bin_fd; /*file descriptor*/
+};
+
+/* FW update status Info */
+struct ctrl_data_fwupd {
+	u8 dev_state;
+	int fw_upd_retries;
+	int total_packets;
+	int num_packets_sent;
+	/*0:In progress, 1: Finished */
+	bool fw_dl_finshed;
+	/* 0:PASS, Non-zero error code. Read only after fw_dl finished=1 */
+	int fw_dl_status_code;
+};
+
 struct intel_cvs {
 	struct device *dev;
 	enum icvs_cap cap;
@@ -200,8 +234,18 @@ struct intel_cvs {
 	bool close_fw_dl_task;
 	wait_queue_head_t hostwake_event;
 	wait_queue_head_t update_complete_event;
+	wait_queue_head_t lvfs_fwdl_complete_event;
 	int hostwake_event_arg;
 	int update_complete_event_arg;
+	int lvfs_fwdl_complete_event_arg;
+	bool cv_suspend;
+	bool fw_dl_task_started;
+	struct bin_attribute cvs_fw_bin_write;
+	spinlock_t buffer_lock;
+	struct cvs_to_plugin_interface cvs_to_plugin;
+	struct plugin_to_cvs_interface plugin_to_cvs;
+	struct cvs_fw ver_post_fwupd;
+	struct ctrl_data_fwupd info_fwupd;
 };
 
 #ifdef DEBUG_CVS

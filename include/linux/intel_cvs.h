@@ -31,7 +31,9 @@
 #define GPIO_WRITE_DELAY_MS 100
 #define GPIO_RESET_MS 2
 #define FW_MAX_RETRY 5
-
+/* Below two macros are WA for "JIRA ID ISCVS-13" */
+#define WA_FW_DL_WAIT 100
+#define WA_FW_DL_WAIT_2 1000
 #define _MAX_PATH 260
 #define I2C_PKT_SIZE 256
 #define CV_FW_DL_MAX_TRY_DEFAULT 5
@@ -46,6 +48,10 @@
 	{                                              \
 		'V', 'I', 'S', 'S', 'O', 'C', 'F', 'W' \
 	}
+#define CVMAGICNUMSIZE              sizeof(u32)
+#define CVMAGICNUM                  0xCAFEB0BA
+#define CVMAGICNUM_REVERSE          0xBAB0FECA
+#define CVMAGICNUM_UNKNOWN          0xDEADBEEF
 
 /* ICVS capability */
 enum icvs_cap { ICVS_NOTSUP = 0, ICVS_LIGHTCAP, ICVS_FULLCAP };
@@ -55,6 +61,7 @@ enum cvs_command {
 	GET_DEVICE_STATE = 0x0800,
 	GET_FW_VERSION = 0x0801,
 	GET_VID_PID = 0x0802,
+	GET_DEV_CAPABILITY = 0x0804,
 	SET_HOST_IDENTIFIER = 0x0805,
 	FW_LOADER_START = 0x0820,
 	FW_LOADER_DATA = 0x0821,
@@ -106,6 +113,24 @@ union cv_host_identifiers {
 	} field;
 };
 
+enum cv_dev_capability_mask
+
+{
+	HOST_MIPI_CONFIG_REQUIRED_MASK  = (1 << 15),
+	FW_ANTIROLLBACK_MASK            = (1 << 14),
+	PRIVACY2VISIONDRIVER_MASK       = (1 << 13),
+	FWUPDATE_RESET_REQUIRED_MASK    = (1 << 12),
+	NOCAMERA_DURING_FWUPDATE_MASK   = (1 << 11),
+	CV_POWER_DOMAIN_MASK            = (1 << 10),
+	CAPABILITY_RESERVED_BYTE_MASK   = (0xFF),
+};
+
+struct cv_ver_capability {
+	u8 protocol_ver_major;
+	u8 protocol_ver_minor;
+	u16  dev_capability;
+} __attribute__((__packed__));
+
 /* CV-returned data from i2c */
 struct cvs_fw {
 	u32 major;
@@ -149,6 +174,9 @@ struct intel_cvs {
 	enum icvs_state icvs_state;
 	enum icvs_sensor_state icvs_sensor_state;
 	union cv_host_identifiers host_identifiers;
+	bool magic_num_support;
+	u32  magic_num_received;
+	struct cv_ver_capability cv_fw_capability;
 
 	int i2c_shared;
 	unsigned long long oem_prod_id;

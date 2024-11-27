@@ -16,6 +16,7 @@ int cvs_release_camera_sensor_internal(void);
 int cvs_read_i2c(u16 cmd, char *data, int size);
 int cvs_write_i2c(u16 cmd, u8 *data, u32 len);
 int cvs_get_device_state(u8 *cv_fw_state);
+int cvs_get_device_cap(struct cv_ver_capability *cv_fw_cap);
 int cvs_wait_for_host_wake(u64 time_ms);
 int cvs_dev_fw_dl(void);
 int cvs_dev_fw_dl_start(void);

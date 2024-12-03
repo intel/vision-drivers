@@ -137,7 +137,7 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 	icvs->req = devm_gpiod_get(icvs->dev, "req", GPIOD_OUT_HIGH);
 	if (IS_ERR(icvs->req)) {
 		dev_err(icvs->dev, "Failed to get REQUEST gpiod");
-		ret = -EIO;
+		ret = -EPROBE_DEFER;
 		goto exit;
 	}
 

@@ -136,26 +136,26 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 	/* Request GPIO */
 	icvs->req = devm_gpiod_get(icvs->dev, "req", GPIOD_OUT_HIGH);
 	if (IS_ERR(icvs->req)) {
-		dev_err(icvs->dev, "Failed to get REQUEST gpiod");
-		ret = -EIO;
-		goto exit;
+		dev_err(icvs->dev, "Get request gpiod failed. Do deferred probing");
+		return dev_err_probe(icvs->dev, -EPROBE_DEFER,
+							 "Do deferred probing as request gpiod failed");
 	}
 
 	/* Response GPIO */
 	icvs->resp = devm_gpiod_get(icvs->dev, "resp", GPIOD_IN);
 	if (IS_ERR(icvs->resp)) {
-		dev_err(icvs->dev, "Failed to get RESPONSE gpiod\n");
-		ret = -EIO;
-		goto exit;
+		dev_err(icvs->dev, "Get response gpiod failed. Do deferred probing");
+		return dev_err_probe(icvs->dev, -EPROBE_DEFER,
+							 "Do deferred probing as response gpiod failed");
 	}
 
 	if (icvs->cap == ICVS_FULLCAP) {
 		/* Reset GPIO */
 		icvs->rst = devm_gpiod_get(icvs->dev, "rst", GPIOD_OUT_HIGH);
 		if (IS_ERR(icvs->rst)) {
-			dev_err(icvs->dev, "Failed to get RESET gpiod\n");
-			ret = -EIO;
-			goto exit;
+			dev_err(icvs->dev, "Get reset gpiod failed. Do deferred probing");
+			return dev_err_probe(icvs->dev, -EPROBE_DEFER,
+								 "Do deferred probing as reset gpiod failed");
 		}
 
 		/* Wake Interrupt */
@@ -192,6 +192,8 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		mdelay(FW_PREPARE_MS);
 		schedule_work(&icvs->fw_dl_task);
 	}
+	acpi_dev_clear_dependencies(ACPI_COMPANION(icvs->dev));
+
 exit:
 	if (ret)
 		devm_kfree(icvs->dev, icvs);
@@ -591,3 +593,4 @@ MODULE_AUTHOR("Hemanth Rachakonda <hemanth.rachakonda@intel.com>");
 MODULE_AUTHOR("Srinivas Alla <alla.srinivas@intel.com>");
 MODULE_DESCRIPTION("Intel CVS driver");
 MODULE_LICENSE("GPL v2");
+MODULE_SOFTDEP("pre: usbio gpio-usbio i2c-usbio");

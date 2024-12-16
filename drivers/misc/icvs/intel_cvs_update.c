@@ -677,5 +677,6 @@ xit:
 	ctx->update_complete_event_arg = 1;
 	wake_up_interruptible(&ctx->update_complete_event);
 	ctx->fw_dl_task_finished = true;
+	acpi_dev_clear_dependencies(ACPI_COMPANION(&client->dev));
 	dev_info(cvs->dev, "%s:Exiting fw_dl thread", __func__);
 }

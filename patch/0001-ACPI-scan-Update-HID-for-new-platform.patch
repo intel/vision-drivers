@@ -1,0 +1,30 @@
+From 59915832c9dba8156210957a38812f408614a176 Mon Sep 17 00:00:00 2001
+From: Jason Chen <jason.z.chen@intel.com>
+Date: Fri, 13 Dec 2024 10:05:07 +0800
+Subject: [PATCH] ACPI: scan: Update HID for new platform
+
+To resolve the probe-ordering issue on the newer platform
+Update the HID for LNL and ARL
+
+Signed-off-by: Hao Yao <hao.yao@intel.com>
+Signed-off-by: Jason Chen <jason.z.chen@intel.com>
+---
+ drivers/acpi/scan.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/acpi/scan.c b/drivers/acpi/scan.c
+index 22ae7829a915..6fe9569160cd 100644
+--- a/drivers/acpi/scan.c
++++ b/drivers/acpi/scan.c
+@@ -861,6 +861,8 @@ static const char * const acpi_honor_dep_ids[] = {
+ 	"INTC1095", /* IVSC (ADL) driver must be loaded to allow i2c access to camera sensors */
+ 	"INTC100A", /* IVSC (RPL) driver must be loaded to allow i2c access to camera sensors */
+ 	"INTC10CF", /* IVSC (MTL) driver must be loaded to allow i2c access to camera sensors */
++	"INTC10DE", /* IVSC (LNL) driver must be loaded to allow i2c access to camera sensors */
++	"INTC10E0", /* IVSC (ARL) driver must be loaded to allow i2c access to camera sensors */
+ 	NULL
+ };
+ 
+-- 
+2.34.1
+

@@ -10,6 +10,7 @@
 
 int cvs_reset_cv_device(void);
 void cvs_fw_dl_thread(struct work_struct *arg);
+int cvs_get_fwver_vid_pid(void);
 
 int cvs_acquire_camera_sensor_internal(void);
 int cvs_release_camera_sensor_internal(void);
@@ -22,5 +23,4 @@ int cvs_dev_fw_dl(void);
 int cvs_dev_fw_dl_start(void);
 int cvs_dev_fw_dl_data(void);
 int cvs_dev_fw_dl_end(void);
-int cvs_get_dev_state(void);
 #endif // __INTEL_CVS_UPDATE_H__

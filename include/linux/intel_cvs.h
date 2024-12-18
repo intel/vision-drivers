@@ -20,38 +20,20 @@
 #define ICVS_FULL 4
 #define ICVS_LIGHT 2
 
-/* WDT timeout in ms */
-#define WDT_TIMEOUT 5000
-
-/* RESET values */
-#define RST_TIME 100
-#define RST_RETRY 5
-
+#define FW_BIN_HDR_SIZE 256
 #define GPIO_READ_DELAY_MS 100
 #define GPIO_WRITE_DELAY_MS 100
 #define GPIO_RESET_MS 2
 #define FW_MAX_RETRY 5
-/* Below two macros are WA for "JIRA ID ISCVS-13" */
-#define WA_FW_DL_WAIT 100
-#define WA_FW_DL_WAIT_2 1000
-#define _MAX_PATH 260
 #define I2C_PKT_SIZE 256
-#define CV_FW_DL_MAX_TRY_DEFAULT 5
 #define FW_PREPARE_MS 100
 #define WAIT_HOST_RELEASE_MS 10
 #define WAIT_HOST_WAKE_NORMAL_MS 1000
 #define WAIT_HOST_WAKE_RESET_MS 1000
 #define WAIT_NORMAL_MS 500
-#define WAIT_HOST_WAKE_FLASH_LONG_MS 200000L
-#define MAGICNUMSIZE 8
-#define MAGICNUM                                       \
-	{                                              \
-		'V', 'I', 'S', 'S', 'O', 'C', 'F', 'W' \
-	}
-#define CVMAGICNUMSIZE              sizeof(u32)
-#define CVMAGICNUM                  0xCAFEB0BA
-#define CVMAGICNUM_REVERSE          0xBAB0FECA
-#define CVMAGICNUM_UNKNOWN          0xDEADBEEF
+#define CVMAGICNUMSIZE sizeof(u32)
+#define CVMAGICNUM 0xCAFEB0BA
+#define CVMAGICNUM_UNKNOWN 0xDEADBEEF
 
 /* ICVS capability */
 enum icvs_cap { ICVS_NOTSUP = 0, ICVS_LIGHTCAP, ICVS_FULLCAP };
@@ -103,19 +85,17 @@ enum cvs_camera_owner {
 };
 
 union cv_host_identifiers {
-	u32      value;
+	u32 value;
 	struct {
-		u32      Reserved : 27;
-		u32      VisionSensing : 1;
-		u32      DevicePowerSetting : 2;
-		u32      PrivacyLedHost : 1;
-		u32      rgbCameraPwrUpHost : 1;
+		u32 reserved : 27;
+		u32 vision_sensing : 1;
+		u32 device_power_setting : 2;
+		u32 privacy_led_host : 1;
+		u32 rgbcamera_pwrup_host : 1;
 	} field;
 };
 
-enum cv_dev_capability_mask
-
-{
+enum cv_dev_capability_mask {
 	HOST_MIPI_CONFIG_REQUIRED_MASK  = (1 << 15),
 	FW_ANTIROLLBACK_MASK            = (1 << 14),
 	PRIVACY2VISIONDRIVER_MASK       = (1 << 13),
@@ -129,7 +109,7 @@ struct cv_ver_capability {
 	u8 protocol_ver_major;
 	u8 protocol_ver_minor;
 	u16  dev_capability;
-} __attribute__((__packed__));
+} __packed;
 
 /* CV-returned data from i2c */
 struct cvs_fw {
@@ -137,25 +117,45 @@ struct cvs_fw {
 	u32 minor;
 	u32 hotfix;
 	u32 build;
-} __attribute__((__packed__));
+} __packed;
 
 struct cvs_id {
 	u16 vid;
 	u16 pid;
-} __attribute__((__packed__));
+} __packed;
 
-struct cvs_fw_header {
-	u8 magic_number[8];
-	struct cvs_fw fw_ver;
-	struct cvs_id vid_pid;
-	/* offset of the FW binary from the beginning of the file */
-	u32 fw_offset;
-	/* pad with 0 */
-	u8 reserved[256 - sizeof(u8) * 8 /*magic_number*/ -
-		    sizeof(struct cvs_fw) - sizeof(struct cvs_id) -
-		    sizeof(u32) /*fw_offset*/ - sizeof(u32) /*header_checksum*/];
-	/* 4bytes CRC checksum of the header, not include this header_checksum itself */
-	u32 header_checksum;
+/* Params updated by vision driver */
+struct cvs_to_plugin_interface {
+	/* Device FW Version */
+	u32 major;
+	u32 minor;
+	u32 hotfix;
+	u32 build;
+	/* Device vid,pid */
+	u16 vid;
+	u16 pid;
+	int opid;
+	int dev_capabilities;
+};
+
+/* Params updated by CVS plugin */
+struct plugin_to_cvs_interface {
+	int max_download_time; /*milli sec*/
+	int max_flash_time; /*milli sec*/
+	int max_fwupd_retry_count;
+	int fw_bin_fd; /*file descriptor*/
+};
+
+/* FW update status Info */
+struct ctrl_data_fwupd {
+	u8 dev_state;
+	int fw_upd_retries;
+	int total_packets;
+	int num_packets_sent;
+	/*0:In progress, 1: Finished */
+	bool fw_dl_finshed;
+	/* 0:PASS, Non-zero error code. Read only after fw_dl finished=1 */
+	int fw_dl_status_code;
 };
 
 struct intel_cvs {
@@ -175,7 +175,6 @@ struct intel_cvs {
 	enum icvs_sensor_state icvs_sensor_state;
 	union cv_host_identifiers host_identifiers;
 	bool magic_num_support;
-	u32  magic_num_received;
 	struct cv_ver_capability cv_fw_capability;
 
 	int i2c_shared;
@@ -184,24 +183,26 @@ struct intel_cvs {
 	int int_ref_count;
 
 	/* FW update info */
-	u8 in_buf[I2C_PKT_SIZE];
-	u8 out_buf[I2C_PKT_SIZE];
 	struct work_struct fw_dl_task;
-	const struct firmware *file;
 	u32 fw_update_retries;
-	u32 fw_file_path[_MAX_PATH];
 	void *fw_buffer;
 	u32 fw_buffer_size;
 	u32 max_flashtime_ms;
 	u8 cv_fw_state;
-	char fw_filename[24];
 	bool fw_dl_task_finished;
-	bool fw_dl_needed;
 	bool close_fw_dl_task;
 	wait_queue_head_t hostwake_event;
 	wait_queue_head_t update_complete_event;
+	wait_queue_head_t lvfs_fwdl_complete_event;
 	int hostwake_event_arg;
 	int update_complete_event_arg;
+	int lvfs_fwdl_complete_event_arg;
+	bool cv_suspend;
+	bool fw_dl_task_started;
+	spinlock_t buffer_lock;
+	struct cvs_to_plugin_interface cvs_to_plugin;
+	struct plugin_to_cvs_interface plugin_to_cvs;
+	struct ctrl_data_fwupd info_fwupd;
 };
 
 #ifdef DEBUG_CVS

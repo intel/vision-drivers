@@ -8,7 +8,7 @@
 #include "intel_cvs_update.h"
 
 extern struct intel_cvs *cvs;
-#define FW_BIN_HDR_SIZE sizeof(struct cvs_fw_header)
+
 
 int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 {
@@ -17,11 +17,12 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		container_of(cvs->dev, struct i2c_client, dev);
 	int count;
 	u16 cv_cmd = (((cmd) >> 8) & 0x00ff) | (((cmd) << 8) & 0xff00);
+	u32 cv_host_identifier_size = sizeof(union cv_host_identifiers);
 
 	switch (cmd) {
 	case FW_LOADER_START:
 		count = i2c_master_send(client, (const char *)&cv_cmd,
-					sizeof(u16));
+								sizeof(u16));
 		if (count != sizeof(u16))
 			return -EIO;
 		break;
@@ -32,7 +33,7 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		break;
 	case FW_LOADER_END:
 		count = i2c_master_send(client, (const char *)&cv_cmd,
-					sizeof(u16));
+								sizeof(u16));
 		mdelay(GPIO_WRITE_DELAY_MS);
 		if (count != sizeof(u16))
 			return -EIO;
@@ -40,33 +41,29 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 	case SET_HOST_IDENTIFIER:
 		u8 *out_buff;
 
-		out_buff = devm_kzalloc(
-			ctx->dev,
-			(sizeof(union cv_host_identifiers) + sizeof(cmd)),
-			GFP_KERNEL);
+		out_buff = devm_kzalloc(ctx->dev,
+								(cv_host_identifier_size + sizeof(cmd)),
+								GFP_KERNEL);
 		if (!out_buff) {
-			dev_err(cvs->dev,
-				"%s:Failed to allocate memory for buffer",
-				__func__);
+			dev_err(cvs->dev, "%s:Buffer alloc failed", __func__);
 			return -ENOMEM;
 		}
 		out_buff[0] = (cmd >> 8) & 0x00ff;
 		out_buff[1] = cmd & 0x00ff;
-		ctx->host_identifiers.field.VisionSensing = 0;
-		ctx->host_identifiers.field.DevicePowerSetting = 0;
-		ctx->host_identifiers.field.PrivacyLedHost = 1;
-		ctx->host_identifiers.field.rgbCameraPwrUpHost = 1;
+		ctx->host_identifiers.field.vision_sensing = 0;
+		ctx->host_identifiers.field.device_power_setting = 0;
+		ctx->host_identifiers.field.privacy_led_host = 1;
+		ctx->host_identifiers.field.rgbcamera_pwrup_host = 1;
 
 		memcpy(&out_buff[2], &ctx->host_identifiers.value,
-		       sizeof(union cv_host_identifiers));
+			   cv_host_identifier_size);
 
-		count = i2c_master_send(
-			client, (const char *)out_buff,
-			sizeof(cmd) + sizeof(union cv_host_identifiers));
+		count = i2c_master_send(client, (const char *)out_buff,
+								sizeof(cmd) + cv_host_identifier_size);
 
-		if (count != sizeof(union cv_host_identifiers) + sizeof(cmd))
+		if (count != cv_host_identifier_size + sizeof(cmd))
 			return -EIO;
-		dev_dbg(cvs->dev, "%s: SET_HOST_IDENTIFIER SUCCESS", __func__);
+		dev_dbg(cvs->dev, "%s:set_host_identifier cmd pass", __func__);
 		break;
 	default:
 		dev_err(cvs->dev, "%s:Invalid command type", __func__);
@@ -107,15 +104,15 @@ int cvs_get_device_cap(struct cv_ver_capability *cv_fw_cap)
 	cvs->magic_num_support = true;
 
 	if (cvs_read_i2c(GET_DEV_CAPABILITY, (char *)cv_fw_cap,
-			 sizeof(cv_fw_cap)) <= 0) {
-		dev_info(cvs->dev, "%s:Device protocol is 1.0 ", __func__);
+					 sizeof(struct cv_ver_capability)) <= 0) {
+		dev_info(cvs->dev, "%s:Device protocol is 1.0", __func__);
 		cvs->magic_num_support = false;
 	} else {
 		dev_info(cvs->dev, "%s:Device protocol is %d.%d", __func__,
-			 cvs->cv_fw_capability.protocol_ver_major,
-			 cvs->cv_fw_capability.protocol_ver_minor);
+				 cvs->cv_fw_capability.protocol_ver_major,
+				 cvs->cv_fw_capability.protocol_ver_minor);
 		dev_info(cvs->dev, "%s:Device capability is 0x%x", __func__,
-			 cvs->cv_fw_capability.dev_capability);
+				 cvs->cv_fw_capability.dev_capability);
 	}
 
 	return 0;
@@ -152,25 +149,6 @@ int cvs_reset_cv_device(void)
 	return 0;
 }
 
-int cvs_get_dev_state(void)
-{
-	int status = 0;
-	struct intel_cvs *ctx = cvs;
-	struct i2c_client *client =
-		container_of(cvs->dev, struct i2c_client, dev);
-	u8 fw_state = 0;
-
-	if (IS_ERR_OR_NULL(ctx) || IS_ERR_OR_NULL(client))
-		return -EINVAL;
-
-	if (cvs_get_device_state(&fw_state)) {
-		dev_err(cvs->dev, "%s:cvs_get_device_state() failed", __func__);
-		return -EIO;
-	}
-	ctx->cv_fw_state = fw_state;
-	return status;
-}
-
 int cvs_dev_fw_dl_start(void)
 {
 	struct intel_cvs *ctx = cvs;
@@ -186,8 +164,11 @@ int cvs_dev_fw_dl_start(void)
 		return -EIO;
 	}
 
-	/* WA for issue(JIRA ID ISCVS-13) */
-	mdelay(WA_FW_DL_WAIT_2);
+	/* Wait for Host Wake */
+	if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_NORMAL_MS)) {
+		dev_err(cvs->dev, "%s:Host wake timeout", __func__);
+		return -ETIMEDOUT;
+	}
 	ctx->icvs_state = CV_FW_DOWNLOADING_STATE;
 	/* check CV FW state */
 	if (cvs_get_device_state(&fw_state)) {
@@ -196,9 +177,8 @@ int cvs_dev_fw_dl_start(void)
 	}
 	ctx->cv_fw_state = fw_state;
 	if ((fw_state & DEVICE_DWNLD_STATE_MASK) != DEVICE_DWNLD_STATE_MASK) {
-		dev_err(cvs->dev,
-			"%s:fail to enter download state. fwstate:0x%x",
-			__func__, fw_state);
+		dev_err(cvs->dev, "%s:fail to enter download state. fwstate:0x%x",
+				__func__, fw_state);
 		return -EIO;
 	}
 	return 0;
@@ -221,81 +201,57 @@ int cvs_dev_fw_dl_data(void)
 		int retry = FW_MAX_RETRY;
 
 		if (ctx->close_fw_dl_task == true) {
-			dev_err(cvs->dev, "%s:Received close_fw_dl_task true",
-				__func__);
+			dev_err(cvs->dev, "%s:Received close_fw_dl_task true", __func__);
 			status = -EPERM;
 			goto err_exit;
 		}
 
 		do {
+			u8 out_buf[I2C_PKT_SIZE];
+
 			if (ctx->close_fw_dl_task == true) {
-				dev_info(cvs->dev,
-					 "%s:Received close_fw_dl_task",
-					 __func__);
+				dev_info(cvs->dev, "%s:Received close_fw_dl_task", __func__);
 				status = -EPERM;
 				goto err_exit;
 			}
 
 			/* copy data to outbuf */
-			memcpy(ctx->out_buf, fw_buff_ptr,
-			       fw_size > I2C_PKT_SIZE ? I2C_PKT_SIZE : fw_size);
+			memcpy(out_buf, fw_buff_ptr,
+				   fw_size > I2C_PKT_SIZE ? I2C_PKT_SIZE : fw_size);
 			wmb(); /* Flush WC buffers after writing out_buf */
 
-			if (!status && (fw_state & DEVICE_DWNLD_STATE_MASK)) {
-				if (cvs_write_i2c(FW_LOADER_DATA, ctx->out_buf,
-						  I2C_PKT_SIZE)) {
-					dev_err(cvs->dev,
-						"%s:I2C fw_loader_data failed",
-						__func__);
+			if (fw_state & DEVICE_DWNLD_STATE_MASK) {
+				if (cvs_write_i2c(FW_LOADER_DATA, out_buf, I2C_PKT_SIZE)) {
+					dev_err(cvs->dev, "%s:fw_loader_data failed", __func__);
 					fw_state = DEVICE_DWNLD_ERROR_MASK;
 					goto i2c_packet_loop_end;
 				}
 			}
 
 			/* Wait for Host Wake */
-			cvs_wait_for_host_wake(WAIT_HOST_WAKE_NORMAL_MS);
+			if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_NORMAL_MS)) {
+				dev_err(cvs->dev, "%s:Host wake timeout", __func__);
+				return -EIO;
+			}
+
 			/* Check device state */
 			if (cvs_get_device_state(&fw_state))
 				return -EIO;
 
 			if (!(fw_state & DEVICE_DWNLD_STATE_MASK)) {
-				dev_err(cvs->dev,
-					"%s:device not in download_state",
-					__func__);
+				dev_err(cvs->dev, "%s:Device not in download_state",
+						__func__);
 				return -EIO;
 			}
 
 			if (fw_state & DEVICE_DWNLD_BUSY_MASK) {
-				/* WA for issue(JIRA ID ISCVS-13) */
-				mdelay(WA_FW_DL_WAIT);
-				/* Check device state again */
-				if (cvs_get_device_state(&fw_state))
-					return -EIO;
-				dev_dbg(cvs->dev,
-					"%s:I2C re-check fw_state:0x%x, status:0x%x",
-					__func__, fw_state, status);
-
-				if (fw_state & DEVICE_DWNLD_BUSY_MASK) {
-					dev_err(cvs->dev,
-						"%s:I2C is busy for too long, retry! fw_state:0x%x",
+				dev_err(cvs->dev, "%s:I2C is busy for too long! fw_state:0x%x",
 						__func__, fw_state);
-					/* WA for "JIRA ID ISCVS-13" */
-					mdelay(WA_FW_DL_WAIT_2);
-					/* Check device state again */
-					if (cvs_get_device_state(&fw_state))
-						return -EIO;
-				}
-				if (fw_state & DEVICE_DWNLD_BUSY_MASK) {
-					dev_err(cvs->dev,
-						"%s:I2C is busy for too long! fw_state:0x%x, status:0x%x",
-						__func__, fw_state, status);
-					break;
-				}
+				return -EIO;
 			}
 
 			if (ctx->icvs_state == CV_STOPPING) {
-				dev_err(cvs->dev, "%s:cv_state is CV_STOPPING",
-					__func__);
+				dev_err(cvs->dev, "%s:cv_state is CV_STOPPING", __func__);
 				ctx->fw_update_retries = 0;
 				break;
 			}
@@ -303,24 +259,22 @@ i2c_packet_loop_end:
 		} while (--retry && (fw_state & DEVICE_DWNLD_ERROR_MASK));
 
 		if ((fw_state & DEVICE_DWNLD_BUSY_MASK) ||
-		    (fw_state & DEVICE_DWNLD_ERROR_MASK) ||
-		    ctx->icvs_state == CV_STOPPING || !fw_state) {
-			dev_err(cvs->dev,
-				"%s:got WRONG_2 fw_state:0x%x, cv_state:0x%x, status:0x%x ",
-				__func__, fw_state, ctx->icvs_state, status);
+			(fw_state & DEVICE_DWNLD_ERROR_MASK) ||
+			ctx->icvs_state == CV_STOPPING || !fw_state) {
+			dev_err(cvs->dev, "%s:Wrong fw_state:0x%x, cv_state:0x%x",
+					__func__, fw_state, ctx->icvs_state);
 			status = -EIO;
 			break;
 		}
-
+		ctx->info_fwupd.num_packets_sent++;
 		fw_size -= I2C_PKT_SIZE;
 		fw_buff_ptr += I2C_PKT_SIZE;
 		ctx->cv_fw_state = fw_state;
 	}
 
 err_exit:
-	dev_info(cvs->dev,
-		 "%s:Exit with status:0x%x, fw_state:0x%x, cv_state:0x%x",
-		 __func__, status, fw_state, ctx->icvs_state);
+	dev_info(cvs->dev, "%s:Exit with status:0x%x, fw_st:0x%x, cv_st:0x%x",
+			 __func__, status, fw_state, ctx->icvs_state);
 
 	return status;
 }
@@ -331,11 +285,14 @@ int cvs_dev_fw_dl_end(void)
 	u8 fw_state = 0;
 
 	if (cvs_write_i2c(FW_LOADER_END, NULL, 0)) {
-		dev_err(cvs->dev, "%s:I2C fw_loader_end failed", __func__);
+		dev_err(cvs->dev, "%s:fw_loader_end failed", __func__);
 		return -EIO;
 	}
-	/* WA for "JIRA ID ISCVS-13" */
-	mdelay(WA_FW_DL_WAIT_2);
+
+	if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_NORMAL_MS)) {
+		dev_err(cvs->dev, "%s:Loader_end hostwake error", __func__);
+		return -ETIMEDOUT;
+	}
 	ctx->icvs_state = CV_FW_FLASHING_STATE;
 
 	/* check CV FW state */
@@ -351,19 +308,17 @@ int cvs_dev_fw_dl(void)
 {
 	int status = 0;
 	struct intel_cvs *ctx = cvs;
-	u8 retries = 0;
+	u8 retries = 0, fw_state = 0;
 	const u8 max_retry = 5;
 
 	dev_info(cvs->dev, "%s:Enter", __func__);
-
 	status = cvs_dev_fw_dl_start();
 	if (status) {
 		dev_err(cvs->dev, "%s:cvs_dev_fw_dl_start() fail", __func__);
 	} else {
 		status = cvs_dev_fw_dl_data();
 		if (status)
-			dev_err(cvs->dev, "%s:cvs_dev_fw_dl_data() fail",
-				__func__);
+			dev_err(cvs->dev, "%s:cvs_dev_fw_dl_data() fail", __func__);
 	}
 
 	/* End FW download, no matter if it's pass or fail */
@@ -375,27 +330,25 @@ int cvs_dev_fw_dl(void)
 	if (status)
 		return status;
 
-	if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_NORMAL_MS)) {
-		dev_err(cvs->dev, "%s:Loader End flash hostwake error",
-			__func__);
+	if (cvs_wait_for_host_wake(ctx->max_flashtime_ms)) {
+		dev_err(cvs->dev, "%s:Firmware flash hostwake error", __func__);
 		return -ETIMEDOUT;
 	}
 
-	if (cvs_wait_for_host_wake(ctx->max_flashtime_ms))
-		dev_err(cvs->dev, "%s: FW flash hostwake error", __func__);
-
 	ctx->icvs_state = CV_INIT_STATE;
-	cvs_get_dev_state();
-	if (!ctx->cv_fw_state || (ctx->cv_fw_state & DEVICE_DWNLD_BUSY_MASK)) {
-		dev_err(cvs->dev, "%s: Post Flash device still in DWNLD_BUSY",
-			__func__);
+	if (cvs_get_device_state(&fw_state)) {
+		dev_err(cvs->dev, "%s:cvs_get_device_state() failed", __func__);
+		return -EIO;
+	}
+	ctx->cv_fw_state = fw_state;
+	if (ctx->cv_fw_state & DEVICE_DWNLD_BUSY_MASK) {
+		dev_err(cvs->dev, "%s: Device is still busy after flash", __func__);
 		return -EBUSY;
 	}
 
 	if (!status && cvs->close_fw_dl_task) {
 		status = -EINTR;
-		dev_info(cvs->dev, "%s:Exit with status:0x%x", __func__,
-			 status);
+		dev_info(cvs->dev, "%s:Exit with status:0x%x", __func__, status);
 		return status;
 	}
 
@@ -403,8 +356,7 @@ int cvs_dev_fw_dl(void)
 		do {
 			status = cvs_release_camera_sensor_internal();
 			if (status) {
-				dev_err(cvs->dev, "%s:Release sensor fail",
-					__func__);
+				dev_err(cvs->dev, "%s:Release sensor fail", __func__);
 			} else {
 				ctx->icvs_sensor_state =
 					CV_SENSOR_RELEASED_STATE;
@@ -416,17 +368,20 @@ int cvs_dev_fw_dl(void)
 			 retries++ < max_retry);
 	}
 
+	wait_event_interruptible(cvs->lvfs_fwdl_complete_event,
+							 cvs->lvfs_fwdl_complete_event_arg == 1);
+	cvs->lvfs_fwdl_complete_event_arg = 0;
+
 	/* reset Vision chip */
 	if (cvs_reset_cv_device()) {
-		dev_err(cvs->dev, "%s:CV reset post flash fail",
-			__func__);
+		dev_err(cvs->dev, "%s:CV reset fail after flash", __func__);
 		return -EIO;
 	}
 
 	ctx->icvs_state = CV_INIT_STATE;
 	if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_RESET_MS)) {
-		dev_err(cvs->dev, "%s:CV reset FW boot hostwake error",
-			__func__);
+		dev_err(cvs->dev, "%s:hostwake error after CV reset FW boot",
+				__func__);
 		return -ETIMEDOUT;
 	}
 
@@ -434,332 +389,80 @@ int cvs_dev_fw_dl(void)
 	return status;
 }
 
-static int cvs_get_fwver_vid_pid(void)
+int cvs_get_fwver_vid_pid(void)
 {
-	int rc;
-
 	if (!cvs)
 		return -EINVAL;
 
-	rc = cvs_get_device_cap(&cvs->cv_fw_capability);
+	if (cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver,
+					 sizeof(struct cvs_fw)) <= 0)
+		goto err_xit;
 
-	if (rc < 0) {
-		cvs_release_camera_sensor_internal();
-		return -EIO;
-	}
-
-	rc = cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver,
-			  sizeof(struct cvs_fw));
-	if (rc <= 0) {
-		cvs_release_camera_sensor_internal();
-		return -EIO;
-	}
-
-	rc = cvs_read_i2c(GET_VID_PID, (char *)&cvs->id, sizeof(struct cvs_id));
-	if (rc <= 0) {
-		cvs_release_camera_sensor_internal();
-		return -EIO;
-	}
+	if (cvs_read_i2c(GET_VID_PID, (char *)&cvs->id,
+					 sizeof(struct cvs_id)) <= 0)
+		goto err_xit;
 
 	return 0;
-}
 
-static u32 cvs_calc_checksum(void *data)
-{
-	int i;
-	u32 chksum = 0;
-
-	if (IS_ERR_OR_NULL(data))
-		return PTR_ERR(data);
-
-	for (i = 0; i < FW_BIN_HDR_SIZE / sizeof(u32); i++)
-		chksum += *((u32 *)data + i);
-
-	return chksum;
-}
-
-static int cvs_fw_parse(void)
-{
-	u8 magic[MAGICNUMSIZE + 1] = MAGICNUM;
-	struct cvs_fw_header *ptr_fw_header;
-	int fw_bin_header_size = FW_BIN_HDR_SIZE;
-
-	if (!cvs)
-		return -EINVAL;
-
-	if (!(cvs->fw_buffer && cvs->fw_buffer_size > fw_bin_header_size)) {
-		dev_err(cvs->dev, "%s:Invalid fw_buff params", __func__);
-		return -EINVAL;
-	}
-
-	ptr_fw_header = (struct cvs_fw_header *)(cvs->fw_buffer);
-	if (memcmp(magic, ptr_fw_header, MAGICNUMSIZE) != 0) {
-		dev_err(cvs->dev, "%s:FW has invalid magic number", __func__);
-		return -EINVAL;
-	}
-
-	if (ptr_fw_header->vid_pid.vid != cvs->id.vid ||
-	    ptr_fw_header->vid_pid.pid != cvs->id.pid) {
-		dev_err(cvs->dev, "%s:dev & lib vid, pid mismatch", __func__);
-		return -EINVAL;
-	}
-
-	dev_info(cvs->dev, "%s:Lib FW version is %d.%d.%d.%d", __func__,
-		 ptr_fw_header->fw_ver.major, ptr_fw_header->fw_ver.minor,
-		 ptr_fw_header->fw_ver.hotfix, ptr_fw_header->fw_ver.build);
-
-	dev_info(cvs->dev, "%s:Lib VID:0X%x, PID:0x%x, fw_offset:0x%x",
-		 __func__, ptr_fw_header->vid_pid.vid,
-		 ptr_fw_header->vid_pid.pid, ptr_fw_header->fw_offset);
-
-	if (ptr_fw_header->fw_offset == fw_bin_header_size) {
-		if (cvs_calc_checksum(ptr_fw_header)) {
-			dev_err(cvs->dev, "%s:FW header CRC fail", __func__);
-			return -EINVAL;
-		}
-	} else {
-		dev_err(cvs->dev, "%s:Wrong FW header offset:0x%x", __func__,
-			ptr_fw_header->fw_offset);
-		return -EINVAL;
-	}
-
-	if (cvs->ver.major != ptr_fw_header->fw_ver.major ||
-	    cvs->ver.minor != ptr_fw_header->fw_ver.minor ||
-	    cvs->ver.hotfix != ptr_fw_header->fw_ver.hotfix ||
-	    cvs->ver.build != ptr_fw_header->fw_ver.build) {
-		cvs->fw_dl_needed = true;
-		dev_dbg(cvs->dev, "%s:FW update needed", __func__);
-	} else {
-		cvs->fw_dl_needed = false;
-		dev_info(cvs->dev, "%s:FW update not needed", __func__);
-	}
-
-	return 0;
-}
-
-static bool evaluate_fw(void)
-{
-	int ret, status = 1;
-
-	if (cvs->oem_prod_id) {
-		sprintf(cvs->fw_filename, "cvs/%04X%04X-%04llX.bin",
-			cvs->id.vid, cvs->id.pid, cvs->oem_prod_id);
-	} else {
-		sprintf(cvs->fw_filename, "cvs/%04X%04X.bin", cvs->id.vid,
-			cvs->id.pid);
-	}
-
-	ret = request_firmware(&cvs->file, cvs->fw_filename, cvs->dev);
-	if (ret) {
-		dev_err(cvs->dev, "%s:request_firmware() fail with ret:%d",
-			__func__, ret);
-		return ret;
-	}
-
-	dev_dbg(cvs->dev, "%s: FW bin file found with file_ptr:%p, size:0x%x",
-		__func__, cvs->file->data, (int)cvs->file->size);
-
-	/* Alloc memory for FW Image Buffer */
-	cvs->fw_buffer_size = cvs->file->size;
-	cvs->fw_buffer =
-		devm_kzalloc(cvs->dev, cvs->fw_buffer_size, GFP_KERNEL);
-	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
-		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);
-		release_firmware(cvs->file);
-		return -ENOMEM;
-	}
-
-	dev_dbg(cvs->dev, "%s:fw_buff:%p size:0x%x, out_buf:%p", __func__,
-		cvs->fw_buffer, cvs->fw_buffer_size, cvs->out_buf);
-
-	memcpy(cvs->fw_buffer, cvs->file->data, cvs->fw_buffer_size);
-	wmb(); /* Flush WC buffers after writing fw_buffer */
-
-	status = cvs_fw_parse();
-	if (status)
-		dev_err(cvs->dev, "%s: FW bin file is invalid", __func__);
-
-	release_firmware(cvs->file);
-	return status;
+err_xit:
+	cvs_release_camera_sensor_internal();
+	return -EIO;
 }
 
 void cvs_fw_dl_thread(struct work_struct *arg)
 {
 	int status = 0;
 	u8 fw_state = 0;
+	u32 fw_size = 0;
 	struct intel_cvs *ctx = cvs;
-	struct i2c_client *client =
-		container_of(cvs->dev, struct i2c_client, dev);
 
-	if (IS_ERR_OR_NULL(ctx) || IS_ERR_OR_NULL(client)) {
-		status = -EINVAL;
-		dev_err(cvs->dev, "%s:Invalid cvs_context or client", __func__);
+	if (IS_ERR_OR_NULL(ctx)) {
+		dev_err(cvs->dev, "%s:Invalid ctx. Exit firmware download", __func__);
 		return;
 	}
 
-	ctx->max_flashtime_ms = WAIT_HOST_WAKE_FLASH_LONG_MS;
-	ctx->fw_update_retries = CV_FW_DL_MAX_TRY_DEFAULT;
-
-	if (ctx->icvs_sensor_state == CV_SENSOR_RELEASED_STATE) {
-		if (cvs_acquire_camera_sensor_internal()) {
-			dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
-			goto xit;
-		} else
-			dev_info(cvs->dev, "%s:Tx of ownership success",
-				 __func__);
-	}
-	cvs->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;
-
-	if (!cvs_get_fwver_vid_pid()) {
-		dev_info(cvs->dev, "%s:Device FW version is %d.%d.%d.%d",
-			 __func__, cvs->ver.major, cvs->ver.minor,
-			 cvs->ver.hotfix, cvs->ver.build);
-
-		if (evaluate_fw()) {
-			dev_err(cvs->dev, "%s:FW file not found", __func__);
-			goto xit;
-		}
-	} else {
-		dev_err(cvs->dev, "%s:I2C error. Not able to read vid/pid",
-			__func__);
-		goto xit;
-	}
-
+	fw_size = ctx->fw_buffer_size - FW_BIN_HDR_SIZE;
+	ctx->info_fwupd.total_packets = fw_size / I2C_PKT_SIZE;
+	ctx->info_fwupd.total_packets += (fw_size % I2C_PKT_SIZE) ? 1 : 0;
 	ctx->icvs_state = CV_INIT_STATE;
+
 	do {
-		int reboot_retry = 0;
-
 		if (ctx->close_fw_dl_task == true) {
-			dev_info(cvs->dev, "%s:Received close_fw_dl_task true",
-				 __func__);
+			dev_info(cvs->dev, "%s:Received close_fw_dl_task true", __func__);
 			goto xit;
 		}
-
-		while (reboot_retry <= FW_MAX_RETRY) {
-			fw_state = 0;
-
-			if (ctx->close_fw_dl_task == true) {
-				dev_info(cvs->dev,
-					 "%s:Received close_fw_dl_task true",
-					 __func__);
-				goto xit;
-			}
-
-			if (ctx->icvs_sensor_state ==
-				    CV_SENSOR_RELEASED_STATE &&
-			    ctx->i2c_shared) {
-				status = cvs_acquire_camera_sensor_internal();
-				if (status) {
-					dev_err(cvs->dev,
-						"%s:Acquire sensor fail",
-						__func__);
-					goto xit;
-				} else {
-					ctx->icvs_sensor_state =
-						CV_SENSOR_VISION_ACQUIRED_STATE;
-				}
-			}
-
-			status = cvs_get_device_state(&fw_state);
-			if (!status && (fw_state & DEVICE_ON_BIT_MASK)) {
-				break;
-			} else {
-				dev_err(cvs->dev,
-					"%s:fw error with state:0x%x. Try reboot",
-					__func__, fw_state);
-
-				if (ctx->i2c_shared) {
-					if (cvs_release_camera_sensor_internal()) {
-						dev_err(cvs->dev,
-							"%s:Release sensor fail",
-							__func__);
-					} else {
-						ctx->icvs_sensor_state =
-							CV_SENSOR_RELEASED_STATE;
-					}
-				} else {
-					ctx->icvs_sensor_state =
-						CV_SENSOR_RELEASED_STATE;
-				}
-
-				/* reboot */
-				if (reboot_retry < FW_MAX_RETRY) {
-					if (ctx->icvs_sensor_state ==
-					    CV_SENSOR_RELEASED_STATE) {
-						if (cvs_reset_cv_device())
-							dev_err(cvs->dev,
-								"%s:Reset CV Soc Fail",
-								__func__);
-					}
-					cvs_wait_for_host_wake(
-						WAIT_HOST_WAKE_RESET_MS);
-					reboot_retry++;
-				}
-			}
-		}
-
-		/* max reboot retry achieved and not able to set up I2C communication */
-		if (reboot_retry >= FW_MAX_RETRY && ctx->fw_update_retries &&
-		    ctx->icvs_state != CV_STOPPING && !fw_state) {
-			dev_err(cvs->dev,
-				"%s:Not able to set up i2c after reboot",
-				__func__);
+		if (cvs_get_device_state(&fw_state)) {
+			dev_err(cvs->dev, "%s:cvs_get_device_state() failed", __func__);
 			goto xit;
 		}
-
-		if (!(!status && (fw_state & SENSOR_OWNER_BIT_MASK))) {
-			dev_err(cvs->dev,
-				"%s:firmware error with FW state:0x%x, status:0x%x",
-				__func__, fw_state, status);
-			if (ctx->i2c_shared)
-				goto xit;
-		}
-
-		if (!status && ctx->fw_dl_needed && ctx->fw_update_retries) {
-			dev_info(
-				cvs->dev,
-				"%s:dev & lib versions differ. Start FW update",
-				__func__);
-
-			status = cvs_dev_fw_dl();
-			if (ctx->close_fw_dl_task && status == -EINTR)
-				dev_info(
-					cvs->dev,
-					"%s:flash interrupted,FW reset to factory ver",
-					__func__);
-			else if (ctx->close_fw_dl_task)
-				dev_info(cvs->dev, "%s:cvs_dev_fw_dl cancelled",
+		status = cvs_dev_fw_dl();
+		cvs->info_fwupd.fw_dl_status_code = status;
+		if (ctx->close_fw_dl_task && status == -EINTR) {
+			dev_info(cvs->dev, "%s:flash interrupted,fw reset to factory ver",
 					 __func__);
-			else if (status)
-				dev_err(cvs->dev, "%s:cvs_dev_fw_dl fail",
-					__func__);
-			else {
-				dev_info(cvs->dev, "%s:cvs_dev_fw_dl pass",
-					 __func__);
-				if (ctx->fw_update_retries)
-					ctx->fw_update_retries--;
-				goto xit;
-			}
-		}
-
-		if (ctx->fw_update_retries)
+		} else if (ctx->close_fw_dl_task) {
+			dev_info(cvs->dev, "%s:cvs_dev_fw_dl cancelled", __func__);
+		} else if (status) {
+			dev_err(cvs->dev, "%s:cvs_dev_fw_dl fail", __func__);
+		} else {
+			dev_info(cvs->dev, "%s:cvs_dev_fw_dl pass", __func__);
 			ctx->fw_update_retries--;
-
-	} while (ctx->fw_update_retries);
+			break;
+		}
+	} while (--ctx->fw_update_retries);
 
 xit:
 	/* After FW download acquire sensor to keep sensor ownserhip
-	  with host(IPU) always.This makes IPU-Vision driver interface
-	  simple w/o need of IPU calling vision driver interface API's */
+	 * with host(IPU) always.This makes IPU-Vision driver interface
+	 * simple w/o need of IPU calling vision driver interface API's
+	 */
 	if (ctx->icvs_sensor_state != CV_SENSOR_VISION_ACQUIRED_STATE) {
 		if (cvs_acquire_camera_sensor_internal()) {
 			dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
 		} else {
-			ctx->icvs_sensor_state =
-				CV_SENSOR_VISION_ACQUIRED_STATE;
-			dev_info(cvs->dev,
-				 "%s:Tx of ownership after fw_dl success",
-				 __func__);
+			ctx->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;
+			dev_info(cvs->dev, "%s:Ownership transfer after fw_dl success",
+					 __func__);
 		}
 	} else {
 		ctx->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;

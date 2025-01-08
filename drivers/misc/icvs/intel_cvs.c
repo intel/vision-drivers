@@ -191,7 +191,15 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		/* Start FW D/L task cvs_fw_dl_thread() */
 		mdelay(FW_PREPARE_MS);
 		schedule_work(&icvs->fw_dl_task);
+	} else {
+		mdelay(FW_PREPARE_MS);
+		if (cvs_acquire_camera_sensor_internal()) {
+			dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
+			goto exit;
+		} else
+			dev_info(cvs->dev, "%s:Tx of ownership success", __func__);
 	}
+
 	acpi_dev_clear_dependencies(ACPI_COMPANION(icvs->dev));
 
 exit:
@@ -493,7 +501,7 @@ static int cvs_suspend(struct device *dev)
 	int ret = 0;
 
 	dev_info(icvs->dev, "%s entered\n", __func__);
-	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {	
+	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {
 		cvs->close_fw_dl_task = true;
 		cvs->hostwake_event_arg = 1;
 		wake_up_interruptible(&cvs->hostwake_event);

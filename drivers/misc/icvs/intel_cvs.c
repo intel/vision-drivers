@@ -701,8 +701,10 @@ static int cvs_resume(struct device *dev)
 
 		/* Restart IRQ & fw_dl thread */
 		enable_irq(icvs->irq);
-		schedule_work(&icvs->fw_dl_task);
-		cvs->fw_dl_task_started = true;
+		if (cvs->fw_dl_task_started && !cvs->fw_dl_task_finished) {
+			schedule_work(&icvs->fw_dl_task);
+			cvs->fw_dl_task_started = true;
+		}
 	}
 
 	dev_info(icvs->dev, "%s:completed", __func__);

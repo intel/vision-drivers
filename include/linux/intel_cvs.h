@@ -136,7 +136,7 @@ struct cvs_to_plugin_interface {
 	u16 pid;
 	int opid;
 	int dev_capabilities;
-};
+} __packed;
 
 /* Params updated by CVS plugin */
 struct plugin_to_cvs_interface {
@@ -156,7 +156,7 @@ struct ctrl_data_fwupd {
 	bool fw_dl_finshed;
 	/* 0:PASS, Non-zero error code. Read only after fw_dl finished=1 */
 	int fw_dl_status_code;
-};
+} __packed;
 
 struct intel_cvs {
 	struct device *dev;

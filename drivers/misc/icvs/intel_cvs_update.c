@@ -9,7 +9,6 @@
 
 extern struct intel_cvs *cvs;
 
-
 int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 {
 	struct intel_cvs *ctx = cvs;
@@ -40,6 +39,7 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		break;
 	case SET_HOST_IDENTIFIER:
 		u8 *out_buff;
+		union cv_host_identifiers host_identifiers;
 
 		out_buff = devm_kzalloc(ctx->dev,
 								(cv_host_identifier_size + sizeof(cmd)),
@@ -50,12 +50,12 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		}
 		out_buff[0] = (cmd >> 8) & 0x00ff;
 		out_buff[1] = cmd & 0x00ff;
-		ctx->host_identifiers.field.vision_sensing = 0;
-		ctx->host_identifiers.field.device_power_setting = 0;
-		ctx->host_identifiers.field.privacy_led_host = 1;
-		ctx->host_identifiers.field.rgbcamera_pwrup_host = 1;
+		host_identifiers.field.vision_sensing = 0;
+		host_identifiers.field.device_power_setting = 0;
+		host_identifiers.field.privacy_led_host = 1;
+		host_identifiers.field.rgbcamera_pwrup_host = 1;
 
-		memcpy(&out_buff[2], &ctx->host_identifiers.value,
+		memcpy(&out_buff[2], &host_identifiers.value,
 			   cv_host_identifier_size);
 
 		count = i2c_master_send(client, (const char *)out_buff,
@@ -85,11 +85,6 @@ int cvs_get_device_state(u8 *cv_fw_state)
 
 	if (!((*cv_fw_state) & DEVICE_ON_BIT_MASK)) {
 		dev_err(cvs->dev, "%s:device_on bit not set", __func__);
-		return -EINVAL;
-	}
-
-	if (cvs->i2c_shared && !((*cv_fw_state) & SENSOR_OWNER_BIT_MASK)) {
-		dev_err(cvs->dev, "%s:sensor owner bit not set", __func__);
 		return -EINVAL;
 	}
 
@@ -125,8 +120,9 @@ int cvs_wait_for_host_wake(u64 time_ms)
 
 	/* wait for HOST_WAKE signal, timeout in time_ms */
 	timeout = msecs_to_jiffies(time_ms);
-	ret = wait_event_interruptible_timeout(
-		cvs->hostwake_event, cvs->hostwake_event_arg == 1, timeout);
+	ret = wait_event_interruptible_timeout(cvs->hostwake_event,
+										   cvs->hostwake_event_arg == 1,
+										   timeout);
 
 	if (ret <= 0) {
 		dev_err(cvs->dev, "%s:hostwake wait timeout", __func__);
@@ -200,7 +196,7 @@ int cvs_dev_fw_dl_data(void)
 	while ((fw_size > 0) && (ctx->icvs_state != CV_STOPPING)) {
 		int retry = FW_MAX_RETRY;
 
-		if (ctx->close_fw_dl_task == true) {
+		if (ctx->close_fw_dl_task) {
 			dev_err(cvs->dev, "%s:Received close_fw_dl_task true", __func__);
 			status = -EPERM;
 			goto err_exit;
@@ -209,7 +205,7 @@ int cvs_dev_fw_dl_data(void)
 		do {
 			u8 out_buf[I2C_PKT_SIZE];
 
-			if (ctx->close_fw_dl_task == true) {
+			if (ctx->close_fw_dl_task) {
 				dev_info(cvs->dev, "%s:Received close_fw_dl_task", __func__);
 				status = -EPERM;
 				goto err_exit;
@@ -308,8 +304,7 @@ int cvs_dev_fw_dl(void)
 {
 	int status = 0;
 	struct intel_cvs *ctx = cvs;
-	u8 retries = 0, fw_state = 0;
-	const u8 max_retry = 5;
+	u8 fw_state = 0;
 
 	dev_info(cvs->dev, "%s:Enter", __func__);
 	status = cvs_dev_fw_dl_start();
@@ -352,37 +347,17 @@ int cvs_dev_fw_dl(void)
 		return status;
 	}
 
-	if (ctx->i2c_shared) {
-		do {
-			status = cvs_release_camera_sensor_internal();
-			if (status) {
-				dev_err(cvs->dev, "%s:Release sensor fail", __func__);
-			} else {
-				ctx->icvs_sensor_state =
-					CV_SENSOR_RELEASED_STATE;
-				break;
-			}
-			mdelay(WAIT_NORMAL_MS);
-		} while (ctx->icvs_sensor_state ==
-				 CV_SENSOR_VISION_ACQUIRED_STATE &&
-			 retries++ < max_retry);
-	}
-
 	wait_event_interruptible(cvs->lvfs_fwdl_complete_event,
 							 cvs->lvfs_fwdl_complete_event_arg == 1);
 	cvs->lvfs_fwdl_complete_event_arg = 0;
 
-	/* reset Vision chip */
-	if (cvs_reset_cv_device()) {
-		dev_err(cvs->dev, "%s:CV reset fail after flash", __func__);
-		return -EIO;
-	}
-
-	ctx->icvs_state = CV_INIT_STATE;
-	if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_RESET_MS)) {
-		dev_err(cvs->dev, "%s:hostwake error after CV reset FW boot",
-				__func__);
-		return -ETIMEDOUT;
+	if (!ctx->cv_suspend) {
+		/* reset vision chip */
+		if (cvs_reset_cv_device()) {
+			dev_err(cvs->dev, "%s:CV reset fail after flash", __func__);
+			return -EIO;
+		}
+		ctx->icvs_state = CV_INIT_STATE;
 	}
 
 	dev_info(cvs->dev, "%s:Exit with status:0x%x", __func__, status);
@@ -396,17 +371,13 @@ int cvs_get_fwver_vid_pid(void)
 
 	if (cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver,
 					 sizeof(struct cvs_fw)) <= 0)
-		goto err_xit;
+		return -EIO;
 
 	if (cvs_read_i2c(GET_VID_PID, (char *)&cvs->id,
 					 sizeof(struct cvs_id)) <= 0)
-		goto err_xit;
+		return -EIO;
 
 	return 0;
-
-err_xit:
-	cvs_release_camera_sensor_internal();
-	return -EIO;
 }
 
 void cvs_fw_dl_thread(struct work_struct *arg)
@@ -427,7 +398,7 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 	ctx->icvs_state = CV_INIT_STATE;
 
 	do {
-		if (ctx->close_fw_dl_task == true) {
+		if (ctx->close_fw_dl_task) {
 			dev_info(cvs->dev, "%s:Received close_fw_dl_task true", __func__);
 			goto xit;
 		}
@@ -456,7 +427,8 @@ xit:
 	 * with host(IPU) always.This makes IPU-Vision driver interface
 	 * simple w/o need of IPU calling vision driver interface API's
 	 */
-	if (ctx->icvs_sensor_state != CV_SENSOR_VISION_ACQUIRED_STATE) {
+	if (ctx->icvs_sensor_state != CV_SENSOR_VISION_ACQUIRED_STATE &&
+		!ctx->cv_suspend) {
 		if (cvs_acquire_camera_sensor_internal()) {
 			dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
 		} else {

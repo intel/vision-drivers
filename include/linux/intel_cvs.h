@@ -170,14 +170,11 @@ struct intel_cvs {
 	/* CVS Status */
 	struct cvs_id id;
 	struct cvs_fw ver;
-	enum cvs_state cvs_state;
 	enum icvs_state icvs_state;
 	enum icvs_sensor_state icvs_sensor_state;
-	union cv_host_identifiers host_identifiers;
 	bool magic_num_support;
 	struct cv_ver_capability cv_fw_capability;
 
-	int i2c_shared;
 	unsigned long long oem_prod_id;
 	enum cvs_camera_owner owner;
 	int int_ref_count;

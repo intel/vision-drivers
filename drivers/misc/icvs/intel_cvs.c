@@ -21,16 +21,10 @@ struct intel_cvs *cvs;
 static irqreturn_t cvs_irq_handler(int irq, void *devid)
 {
 	struct intel_cvs *icvs = devid;
-	bool ret = false;
-
-	if (!icvs || !icvs->dev)
-		goto exit;
 
 	icvs->hostwake_event_arg = 1;
 	wake_up_interruptible(&icvs->hostwake_event);
-	ret = true;
-exit:
-	return IRQ_RETVAL(ret);
+	return IRQ_RETVAL(true);
 }
 
 static int cvs_init(struct intel_cvs *icvs)
@@ -38,17 +32,13 @@ static int cvs_init(struct intel_cvs *icvs)
 	int ret = -EINVAL;
 
 	if (!icvs || !icvs->dev || !icvs->rst)
-		goto exit;
+		return -EINVAL;
 
 	ret = devm_request_irq(icvs->dev, icvs->irq, cvs_irq_handler,
 						   IRQF_ONESHOT | IRQF_NO_SUSPEND,
 						   dev_name(icvs->dev), icvs);
-	if (ret) {
+	if (ret)
 		dev_err(icvs->dev, "Failed to request irq");
-		goto exit;
-	}
-
-exit:
 	return ret;
 }
 
@@ -71,27 +61,6 @@ static int find_oem_prod_id(acpi_handle handle, const char *method_name,
 	return 0;
 }
 
-static void find_shared_i2c(acpi_handle handle, const char *method_name,
-			    int *i2c_shared)
-{
-	acpi_status status;
-	unsigned long long value = 0;
-
-	status = acpi_evaluate_integer(handle, (acpi_string)method_name,
-								   NULL, &value);
-
-	if (ACPI_FAILURE(status)) {
-		dev_err(cvs->dev, "%s: ACPI method %s not found", __func__,
-				method_name);
-		*i2c_shared = 0;
-	}
-
-	dev_info(cvs->dev, "%s: ACPI method %s returned:0x%llx", __func__,
-			 method_name, value);
-
-	*i2c_shared = (value == 0) ? 0 : 1;
-}
-
 static int cvs_i2c_probe(struct i2c_client *i2c)
 {
 	struct intel_cvs *icvs;
@@ -100,15 +69,13 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 
 	if (!i2c) {
 		pr_err("No I2C device");
-		goto exit;
+		return -ENODEV;
 	}
 
 	dev_info(&i2c->dev, "%s with i2c_client:%p\n", __func__, i2c);
 	icvs = devm_kzalloc(&i2c->dev, sizeof(struct intel_cvs), GFP_KERNEL);
-	if (!icvs) {
-		ret = -ENOMEM;
-		goto exit;
-	}
+	if (!icvs)
+		return -ENOMEM;
 	icvs->dev = &i2c->dev;
 	i2c_set_clientdata(i2c, icvs);
 	cvs = icvs;
@@ -123,7 +90,6 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		break;
 	default:
 		dev_err(icvs->dev, "Number of GPIOs not supported: %d", ret);
-		devm_kfree(icvs->dev, icvs);
 		ret = -EINVAL;
 		goto exit;
 	}
@@ -167,8 +133,8 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		if (ret > 0) {
 			icvs->irq = ret;
 		} else {
-			dev_err(icvs->dev, "Failed to get WAKE interrupt: %d\n",
-					ret);
+			dev_err(icvs->dev, "Failed to get right wake interrupt:%d", ret);
+			ret = -EINVAL;
 			goto exit;
 		}
 
@@ -184,12 +150,6 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		find_oem_prod_id(handle, "OPID", &icvs->oem_prod_id);
 	}
 
-	handle = ACPI_HANDLE(&i2c->dev);
-	if (!handle) {
-		dev_err(icvs->dev, "Failed to get ACPI handle\n");
-		goto exit;
-	}
-	find_shared_i2c(handle, "IICS", &icvs->i2c_shared);
 	mdelay(FW_PREPARE_MS);
 	ret = cvs_acquire_camera_sensor_internal();
 	if (ret) {
@@ -205,12 +165,10 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 	if (ret)
 		goto exit;
 
-	if (!icvs->i2c_shared) {
-		ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
-		if (ret) {
-			dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
-			goto exit;
-		}
+	ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
+	if (ret) {
+		dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
+		goto exit;
 	}
 	acpi_dev_clear_dependencies(ACPI_COMPANION(icvs->dev));
 
@@ -317,17 +275,15 @@ int cvs_acquire_camera_sensor_internal(void)
 			val = gpiod_get_value_cansleep(cvs->resp);
 		} while (val != 0 && retry--);
 
-		if (val != 0)
-			goto err_out;
+		if (val != 0) {
+			dev_err(cvs->dev, "%s:error! val %d (!=0)", __func__, val);
+			return -EIO;
+		}
 	}
 
 	cvs->owner = CVS_CAMERA_IPU;
 	cvs->int_ref_count++;
 	return 0;
-
-err_out:
-	dev_err(cvs->dev, "%s:error! val %d (!=0)\n", __func__, val);
-	return -EIO;
 }
 
 int cvs_release_camera_sensor_internal(void)
@@ -350,20 +306,19 @@ int cvs_release_camera_sensor_internal(void)
 			val = gpiod_get_value_cansleep(cvs->resp);
 		} while (val != 1 && retry--);
 
-		if (val != 1)
-			goto err_out;
+		if (val != 1) {
+			dev_err(cvs->dev, "%s:error! val %d (!=1)", __func__, val);
+			return -EIO;
+		}
 	}
 
 	cvs->int_ref_count--;
 	cvs->owner = (cvs->int_ref_count == 0) ? CVS_CAMERA_CVS : CVS_CAMERA_IPU;
 	return 0;
-
-err_out:
-	dev_err(cvs->dev, "%s:error! val %d (!=1)\n", __func__, val);
-	return -EIO;
 }
 
 #ifdef DEBUG_CVS
+enum cvs_state cvs_state;
 int cvs_exec_cmd(enum cvs_command command)
 {
 	int rc;
@@ -371,21 +326,17 @@ int cvs_exec_cmd(enum cvs_command command)
 	if (!cvs)
 		return -EINVAL;
 
-	if (cvs->i2c_shared && cvs->icvs_state != CV_FW_DOWNLOADING_STATE)
-		if (cvs_acquire_camera_sensor_internal())
-			return -EINVAL;
-
 	if (cvs->icvs_state == CV_FW_DOWNLOADING_STATE ||
 		cvs->icvs_state == CV_FW_FLASHING_STATE) {
 		dev_err(cvs->dev, "%s:Device busy, cmd:0X%x can't be queried now",
 				__func__, command);
-		cvs->cvs_state = cvs->cv_fw_state;
+		cvs_state = cvs->cv_fw_state;
 		return -EBUSY;
 	}
 
 	switch (command) {
 	case GET_DEVICE_STATE:
-		rc = cvs_read_i2c(GET_DEVICE_STATE, (char *)&cvs->cvs_state,
+		rc = cvs_read_i2c(GET_DEVICE_STATE, (char *)&cvs_state,
 						  sizeof(char));
 		if (rc <= 0)
 			goto err_out;
@@ -410,16 +361,9 @@ int cvs_exec_cmd(enum cvs_command command)
 			command);
 	}
 
-	if (cvs->i2c_shared && cvs->icvs_state != CV_FW_DOWNLOADING_STATE)
-		if (cvs_release_camera_sensor_internal())
-			return -EINVAL;
-
 	return 0;
 
 err_out:
-	if (cvs->i2c_shared && cvs->icvs_state != CV_FW_DOWNLOADING_STATE)
-		cvs_release_camera_sensor_internal();
-
 	dev_err(cvs->dev, "%s:CVS command 0x%x failed, cvs_read_i2c: %d",
 			__func__, command, rc);
 	return -EIO;
@@ -455,24 +399,20 @@ static ssize_t coredump_show(struct device *dev,
 {
 	u8 stat_name[256] = "";
 
-	cvs_state_str(cvs->cvs_state, stat_name);
-
+	cvs_state_str(cvs_state, stat_name);
 	return sysfs_emit(buf,
 		"CVS VID/PID     : 0x%x 0x%x\n"
 		"CVS Firmware Ver: %d.%d.%d.%d (0x%x.0x%x.0x%x.0x%x)\n"
 		"CVS Device State: 0x%x (%s)\n"
 		"Reference Count : %d\n"
-		"CVS Owner       : %s\n"
-		"I2C Shared      : %d\n",
+		"CVS Owner       : %s\n",
 		cvs->id.vid, cvs->id.pid, cvs->ver.major, cvs->ver.minor,
 		cvs->ver.hotfix, cvs->ver.build, cvs->ver.major, cvs->ver.minor,
-		cvs->ver.hotfix, cvs->ver.build, cvs->cvs_state, stat_name,
+		cvs->ver.hotfix, cvs->ver.build, cvs_state, stat_name,
 		cvs->int_ref_count,
 		((cvs->owner == CVS_CAMERA_NONE) ? "NONE" :
 		 (cvs->owner == CVS_CAMERA_CVS)	 ? "CVS" :
-		 (cvs->owner == CVS_CAMERA_IPU)	 ? "HOST" :
-						   "UNKNOWN"),
-		cvs->i2c_shared);
+		 (cvs->owner == CVS_CAMERA_IPU)	 ? "HOST" : "UNKNOWN"));
 }
 static DEVICE_ATTR_RO(coredump);
 
@@ -660,6 +600,7 @@ static int cvs_suspend(struct device *dev)
 
 	dev_info(icvs->dev, "%s:entered\n", __func__);
 	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {
+		icvs->cv_suspend = true;
 		cvs->close_fw_dl_task = true;
 		cvs->hostwake_event_arg = 1;
 		wake_up_interruptible(&cvs->hostwake_event);
@@ -682,27 +623,25 @@ static int cvs_resume(struct device *dev)
 {
 	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
 	struct intel_cvs *icvs = i2c_get_clientdata(i2c);
-	int val = -1, retry = FW_MAX_RETRY;
+	int val = -1;
 
 	dev_info(icvs->dev, "%s entered", __func__);
-	/* Wait for bridge ready */
-	while (val < 0 && retry--) {
-		val = gpiod_get_value_cansleep(cvs->resp);
-		mdelay(WAIT_HOST_WAKE_NORMAL_MS);
-	}
-
-	if (val < 0)
-		dev_err(icvs->dev, "%s: Failed to read gpio via usb bridge",
-				__func__);
+	/* Check if bridge is ready */
+	val = gpiod_get_value_cansleep(icvs->resp);
+	if (val != 0)
+		dev_err(icvs->dev, "%s:Wrong gpio_response val:%x read via bridge",
+				__func__, val);
 
 	if (icvs->cap == ICVS_FULLCAP) {
-		icvs->fw_dl_task_finished = false;
+		icvs->cv_suspend = false;
 		icvs->close_fw_dl_task = false;
 
-		/* Restart IRQ & fw_dl thread */
+		/* Start IRQ */
 		enable_irq(icvs->irq);
-		schedule_work(&icvs->fw_dl_task);
-		cvs->fw_dl_task_started = true;
+		if (cvs->fw_dl_task_started && !cvs->fw_dl_task_finished) {
+			schedule_work(&icvs->fw_dl_task);
+			cvs->fw_dl_task_started = true;
+		}
 	}
 
 	dev_info(icvs->dev, "%s:completed", __func__);

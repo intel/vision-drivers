@@ -211,8 +211,9 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 			}
 			cvs_exit(icvs);
 		}
-        if(cvs->fw_buffer)
-            vfree(cvs->fw_buffer);
+		if (cvs->fw_buffer)
+			vfree(cvs->fw_buffer);
+
 		devm_kfree(&i2c->dev, icvs);
 	}
 }
@@ -528,7 +529,7 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 	cvs->fw_buffer_size = fw_bin_size;
 	cvs->max_flashtime_ms = cvs->plugin_to_cvs.max_flash_time;
 	cvs->fw_update_retries = cvs->plugin_to_cvs.max_fwupd_retry_count;
-    cvs->fw_buffer = vmalloc(cvs->fw_buffer_size);
+	cvs->fw_buffer = vmalloc(cvs->fw_buffer_size);
 
 	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
 		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);

@@ -52,7 +52,7 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		out_buff[1] = cmd & 0x00ff;
 		host_identifiers.field.vision_sensing = 0;
 		host_identifiers.field.device_power_setting = 0;
-		host_identifiers.field.privacy_led_host = 1;
+		host_identifiers.field.privacy_led_host = 0;
 		host_identifiers.field.rgbcamera_pwrup_host = 1;
 
 		memcpy(&out_buff[2], &host_identifiers.value,

@@ -383,6 +383,14 @@ int cvs_dev_fw_dl(void)
 			return -EIO;
 		}
 		ctx->icvs_state = CV_INIT_STATE;
+		ctx->icvs_sensor_state = CV_SENSOR_RELEASED_STATE;
+
+		//wait for the host_wake
+		if (cvs_wait_for_host_wake(ctx->max_flashtime_ms)) {
+			dev_err(cvs->dev, "%s:Firmware flash hostwake error after reset", __func__);
+			return -ETIMEDOUT;
+		}
+
 	}
 
 	dev_info(cvs->dev, "%s:Exit with status:0x%x", __func__, status);
@@ -453,7 +461,7 @@ xit:
 	 * simple w/o need of IPU calling vision driver interface API's
 	 */
 	if (ctx->icvs_sensor_state != CV_SENSOR_VISION_ACQUIRED_STATE &&
-		!ctx->cv_suspend) {
+	    !ctx->cv_suspend) {
 		if (cvs_acquire_camera_sensor_internal()) {
 			dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
 		} else {

@@ -108,6 +108,11 @@ int cvs_get_device_cap(struct cv_ver_capability *cv_fw_cap)
 				 cvs->cv_fw_capability.protocol_ver_minor);
 		dev_info(cvs->dev, "%s:Device capability is 0x%x", __func__,
 				 cvs->cv_fw_capability.dev_capability);
+
+		if ((cvs->cv_fw_capability.protocol_ver_major > 2) ||
+		    ((cvs->cv_fw_capability.protocol_ver_major == 2) && (cvs->cv_fw_capability.protocol_ver_minor >= 2))) {
+			cvs->loader_cmd_size = CMD_SIZE;
+		}
 	}
 
 	return 0;
@@ -187,7 +192,22 @@ int cvs_dev_fw_dl_data(void)
 	u8 fw_state = DEVICE_DWNLD_STATE_MASK;
 	u8 *fw_buff_ptr = NULL;
 	u32 fw_size = 0;
+	u8 *out_buf;
+	u8 *out_buf_ptr;
+	size_t buf_size = I2C_PKT_SIZE + cvs->loader_cmd_size;
 
+	// Allocate memory for the buffer
+	out_buf = kzalloc(buf_size, GFP_KERNEL);
+
+	if (IS_ERR_OR_NULL(out_buf)) {
+		dev_err(cvs->dev, "%s:No memory for fw_buffer packet", __func__);
+		return -ENOMEM;
+	}
+	if (cvs->loader_cmd_size) {
+		out_buf[0] = (FW_LOADER_DATA >> 8);
+		out_buf[1] = (FW_LOADER_DATA & 0xFF);
+	}
+	out_buf_ptr = out_buf + cvs->loader_cmd_size;
 	dev_info(cvs->dev, "%s:Enter", __func__);
 
 	fw_buff_ptr = (u8 *)ctx->fw_buffer + FW_BIN_HDR_SIZE;
@@ -203,21 +223,19 @@ int cvs_dev_fw_dl_data(void)
 		}
 
 		do {
-			u8 out_buf[I2C_PKT_SIZE];
 
 			if (ctx->close_fw_dl_task) {
 				dev_info(cvs->dev, "%s:Received close_fw_dl_task", __func__);
 				status = -EPERM;
 				goto err_exit;
 			}
-
 			/* copy data to outbuf */
-			memcpy(out_buf, fw_buff_ptr,
+			memcpy(out_buf_ptr, fw_buff_ptr,
 				   fw_size > I2C_PKT_SIZE ? I2C_PKT_SIZE : fw_size);
 			wmb(); /* Flush WC buffers after writing out_buf */
 
 			if (fw_state & DEVICE_DWNLD_STATE_MASK) {
-				if (cvs_write_i2c(FW_LOADER_DATA, out_buf, I2C_PKT_SIZE)) {
+				if (cvs_write_i2c(FW_LOADER_DATA, out_buf, I2C_PKT_SIZE + cvs->loader_cmd_size)) {
 					dev_err(cvs->dev, "%s:fw_loader_data failed", __func__);
 					fw_state = DEVICE_DWNLD_ERROR_MASK;
 					goto i2c_packet_loop_end;
@@ -227,23 +245,28 @@ int cvs_dev_fw_dl_data(void)
 			/* Wait for Host Wake */
 			if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_NORMAL_MS)) {
 				dev_err(cvs->dev, "%s:Host wake timeout", __func__);
-				return -EIO;
+				status = -EIO;
+				goto err_exit;
 			}
 
 			/* Check device state */
-			if (cvs_get_device_state(&fw_state))
-				return -EIO;
+			if (cvs_get_device_state(&fw_state)) {
+				status = -EIO;
+				goto err_exit;
+			}
 
 			if (!(fw_state & DEVICE_DWNLD_STATE_MASK)) {
 				dev_err(cvs->dev, "%s:Device not in download_state",
 						__func__);
-				return -EIO;
+				status = -EIO;
+				goto err_exit;
 			}
 
 			if (fw_state & DEVICE_DWNLD_BUSY_MASK) {
 				dev_err(cvs->dev, "%s:I2C is busy for too long! fw_state:0x%x",
 						__func__, fw_state);
-				return -EIO;
+				status = -EIO;
+				goto err_exit;
 			}
 
 			if (ctx->icvs_state == CV_STOPPING) {
@@ -260,7 +283,7 @@ i2c_packet_loop_end:
 			dev_err(cvs->dev, "%s:Wrong fw_state:0x%x, cv_state:0x%x",
 					__func__, fw_state, ctx->icvs_state);
 			status = -EIO;
-			break;
+			goto err_exit;
 		}
 		ctx->info_fwupd.num_packets_sent++;
 		fw_size -= I2C_PKT_SIZE;
@@ -271,6 +294,8 @@ i2c_packet_loop_end:
 err_exit:
 	dev_info(cvs->dev, "%s:Exit with status:0x%x, fw_st:0x%x, cv_st:0x%x",
 			 __func__, status, fw_state, ctx->icvs_state);
+	kfree(out_buf);
+	out_buf_ptr = NULL;
 
 	return status;
 }

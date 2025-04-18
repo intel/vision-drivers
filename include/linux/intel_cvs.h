@@ -26,6 +26,7 @@
 #define GPIO_RESET_MS 2
 #define FW_MAX_RETRY 5
 #define I2C_PKT_SIZE 256
+#define CMD_SIZE 2
 #define FW_PREPARE_MS 100
 #define WAIT_HOST_RELEASE_MS 10
 #define WAIT_HOST_WAKE_NORMAL_MS 1000
@@ -174,6 +175,7 @@ struct intel_cvs {
 	enum icvs_sensor_state icvs_sensor_state;
 	bool magic_num_support;
 	struct cv_ver_capability cv_fw_capability;
+	u8 loader_cmd_size;
 
 	unsigned long long oem_prod_id;
 	enum cvs_camera_owner owner;

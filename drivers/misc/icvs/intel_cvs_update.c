@@ -465,6 +465,8 @@ xit:
 			ctx->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;
 			dev_info(cvs->dev, "%s:Ownership transfer after fw_dl success",
 					 __func__);
+			if (cvs_get_device_cap(&cvs->cv_fw_capability))
+				dev_err(cvs->dev, "%s:Device cap not supported", __func__);
 		}
 	} else {
 		ctx->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;

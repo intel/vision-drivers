@@ -386,10 +386,8 @@ int cvs_dev_fw_dl(void)
 		ctx->icvs_sensor_state = CV_SENSOR_RELEASED_STATE;
 
 		//wait for the host_wake
-		if (cvs_wait_for_host_wake(ctx->max_flashtime_ms)) {
+		if (cvs_wait_for_host_wake(ctx->max_flashtime_ms))
 			dev_err(cvs->dev, "%s:Firmware flash hostwake error after reset", __func__);
-			return -ETIMEDOUT;
-		}
 
 	}
 

@@ -96,18 +96,49 @@ int cvs_get_device_cap(struct cv_ver_capability *cv_fw_cap)
 {
 	if (!cvs)
 		return -EINVAL;
-	cvs->magic_num_support = true;
+
 
 	if (cvs_read_i2c(GET_DEV_CAPABILITY, (char *)cv_fw_cap,
 					 sizeof(struct cv_ver_capability)) <= 0) {
+		dev_err(cvs->dev, "%s:GET_DEV_CAPABILITY cmd failed", __func__);
+		return -EINVAL;
+	}
+
+	dev_info(cvs->dev, "%s:Device protocol is %d.%d", __func__,
+			 cvs->cv_fw_capability.protocol_ver_major,
+			 cvs->cv_fw_capability.protocol_ver_minor);
+	dev_info(cvs->dev, "%s:Device capability is 0x%x", __func__,
+			 cvs->cv_fw_capability.dev_capability);
+
+	return 0;
+}
+
+int cvs_find_magic_num_support(struct intel_cvs *ctx)
+{
+	struct i2c_client *i2c = container_of(ctx->dev, struct i2c_client, dev);
+	int cnt;
+	u16 cmd = GET_VID_PID;
+	u16 cvs_cmd = cpu_to_be16(cmd);
+	int cmd_response;
+
+	cnt = i2c_master_send(i2c, (const char *)&cvs_cmd, sizeof(cvs_cmd));
+	if (cnt != sizeof(cvs_cmd)) {
+		dev_err(ctx->dev, "sending cmd:0x%x to device failed", cmd);
+		return cnt < 0 ? cnt : -EIO;
+	}
+
+	cnt = i2c_master_recv(i2c, (char *)&cmd_response, CVMAGICNUMSIZE);
+	if (cnt != CVMAGICNUMSIZE) {
+		dev_err(ctx->dev, "failed to read back for cmd:0x%x", cmd);
+		return cnt < 0 ? cnt : -EIO;
+	}
+	if (cmd_response != CVMAGICNUM) {
+		dev_info(ctx->dev, "magic number in dev response not supported");
 		dev_info(cvs->dev, "%s:Device protocol is 1.0", __func__);
-		cvs->magic_num_support = false;
+		ctx->magic_num_support = false;
 	} else {
-		dev_info(cvs->dev, "%s:Device protocol is %d.%d", __func__,
-				 cvs->cv_fw_capability.protocol_ver_major,
-				 cvs->cv_fw_capability.protocol_ver_minor);
-		dev_info(cvs->dev, "%s:Device capability is 0x%x", __func__,
-				 cvs->cv_fw_capability.dev_capability);
+		dev_info(ctx->dev, "magic number in dev response supported");
+		ctx->magic_num_support = true;
 	}
 
 	return 0;

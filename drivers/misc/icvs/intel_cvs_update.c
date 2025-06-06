@@ -42,8 +42,7 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		union cv_host_identifiers host_identifiers;
 
 		out_buff = devm_kzalloc(ctx->dev,
-								(cv_host_identifier_size + sizeof(cmd)),
-								GFP_KERNEL);
+					cv_host_identifier_size + sizeof(cmd), GFP_KERNEL);
 		if (!out_buff) {
 			dev_err(cvs->dev, "%s:Buffer alloc failed", __func__);
 			return -ENOMEM;
@@ -52,14 +51,14 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		out_buff[1] = cmd & 0x00ff;
 		host_identifiers.field.vision_sensing = 0;
 		host_identifiers.field.device_power_setting = 0;
-		host_identifiers.field.privacy_led_host = 1;
+		host_identifiers.field.privacy_led_host = 0;
 		host_identifiers.field.rgbcamera_pwrup_host = 1;
 
 		memcpy(&out_buff[2], &host_identifiers.value,
 			   cv_host_identifier_size);
 
 		count = i2c_master_send(client, (const char *)out_buff,
-								sizeof(cmd) + cv_host_identifier_size);
+					sizeof(cmd) + cv_host_identifier_size);
 
 		if (count != cv_host_identifier_size + sizeof(cmd))
 			return -EIO;
@@ -100,19 +99,51 @@ int cvs_get_device_cap(struct cv_ver_capability *cv_fw_cap)
 
 	if (cvs_read_i2c(GET_DEV_CAPABILITY, (char *)cv_fw_cap,
 					 sizeof(struct cv_ver_capability)) <= 0) {
-		dev_info(cvs->dev, "%s:Device protocol is 1.0", __func__);
-		cvs->magic_num_support = false;
-	} else {
-		dev_info(cvs->dev, "%s:Device protocol is %d.%d", __func__,
-				 cvs->cv_fw_capability.protocol_ver_major,
-				 cvs->cv_fw_capability.protocol_ver_minor);
-		dev_info(cvs->dev, "%s:Device capability is 0x%x", __func__,
-				 cvs->cv_fw_capability.dev_capability);
+		dev_err(cvs->dev, "%s:Get device_capability cmd failed", __func__);
+		return -EINVAL;
+	}
 
-		if ((cvs->cv_fw_capability.protocol_ver_major > 2) ||
-		    ((cvs->cv_fw_capability.protocol_ver_major == 2) && (cvs->cv_fw_capability.protocol_ver_minor >= 2))) {
-			cvs->loader_cmd_size = CMD_SIZE;
-		}
+	dev_info(cvs->dev, "%s:Device protocol is %d.%d", __func__,
+			 cvs->cv_fw_capability.protocol_ver_major,
+			 cvs->cv_fw_capability.protocol_ver_minor);
+	dev_info(cvs->dev, "%s:Device capability is 0x%x", __func__,
+			 cvs->cv_fw_capability.dev_capability);
+
+	if (cvs->cv_fw_capability.protocol_ver_major > 2 ||
+		(cvs->cv_fw_capability.protocol_ver_major == 2 &&
+		cvs->cv_fw_capability.protocol_ver_minor >= 2)) {
+		cvs->loader_cmd_size = CMD_SIZE;
+	}
+
+	return 0;
+}
+
+int cvs_find_magic_num_support(struct intel_cvs *ctx)
+{
+	struct i2c_client *i2c = container_of(ctx->dev, struct i2c_client, dev);
+	int cnt;
+	u16 cmd = GET_VID_PID;
+	u16 cvs_cmd = cpu_to_be16(cmd);
+	int cmd_response;
+
+	cnt = i2c_master_send(i2c, (const char *)&cvs_cmd, sizeof(cvs_cmd));
+	if (cnt != sizeof(cvs_cmd)) {
+		dev_err(ctx->dev, "sending cmd:0x%x to device failed", cmd);
+		return cnt < 0 ? cnt : -EIO;
+	}
+
+	cnt = i2c_master_recv(i2c, (char *)&cmd_response, CVMAGICNUMSIZE);
+	if (cnt != CVMAGICNUMSIZE) {
+		dev_err(ctx->dev, "failed to read back for cmd:0x%x", cmd);
+		return cnt < 0 ? cnt : -EIO;
+	}
+	if (cmd_response != CVMAGICNUM) {
+		dev_info(ctx->dev, "magic number in dev response not supported");
+		dev_info(cvs->dev, "%s:Device protocol is 1.0", __func__);
+		ctx->magic_num_support = false;
+	} else {
+		dev_info(ctx->dev, "magic number in dev response supported");
+		ctx->magic_num_support = true;
 	}
 
 	return 0;
@@ -126,8 +157,7 @@ int cvs_wait_for_host_wake(u64 time_ms)
 	/* wait for HOST_WAKE signal, timeout in time_ms */
 	timeout = msecs_to_jiffies(time_ms);
 	ret = wait_event_interruptible_timeout(cvs->hostwake_event,
-										   cvs->hostwake_event_arg == 1,
-										   timeout);
+			cvs->hostwake_event_arg == 1, timeout);
 
 	if (ret <= 0) {
 		dev_err(cvs->dev, "%s:hostwake wait timeout", __func__);
@@ -146,7 +176,6 @@ int cvs_reset_cv_device(void)
 	gpiod_set_value_cansleep(cvs->rst, 0);
 	mdelay(GPIO_RESET_MS);
 	gpiod_set_value_cansleep(cvs->rst, 1);
-	mdelay(FW_PREPARE_MS);
 	return 0;
 }
 
@@ -199,7 +228,7 @@ int cvs_dev_fw_dl_data(void)
 	// Allocate memory for the buffer
 	out_buf = kzalloc(buf_size, GFP_KERNEL);
 
-	if (IS_ERR_OR_NULL(out_buf)) {
+	if (!out_buf) {
 		dev_err(cvs->dev, "%s:No memory for fw_buffer packet", __func__);
 		return -ENOMEM;
 	}
@@ -223,7 +252,6 @@ int cvs_dev_fw_dl_data(void)
 		}
 
 		do {
-
 			if (ctx->close_fw_dl_task) {
 				dev_info(cvs->dev, "%s:Received close_fw_dl_task", __func__);
 				status = -EPERM;
@@ -235,7 +263,8 @@ int cvs_dev_fw_dl_data(void)
 			wmb(); /* Flush WC buffers after writing out_buf */
 
 			if (fw_state & DEVICE_DWNLD_STATE_MASK) {
-				if (cvs_write_i2c(FW_LOADER_DATA, out_buf, I2C_PKT_SIZE + cvs->loader_cmd_size)) {
+				if (cvs_write_i2c(FW_LOADER_DATA, out_buf,
+						I2C_PKT_SIZE + cvs->loader_cmd_size)) {
 					dev_err(cvs->dev, "%s:fw_loader_data failed", __func__);
 					fw_state = DEVICE_DWNLD_ERROR_MASK;
 					goto i2c_packet_loop_end;
@@ -383,6 +412,12 @@ int cvs_dev_fw_dl(void)
 			return -EIO;
 		}
 		ctx->icvs_state = CV_INIT_STATE;
+		ctx->icvs_sensor_state = CV_SENSOR_RELEASED_STATE;
+
+		//wait for the host_wake
+		if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_RESET_MS))
+			dev_info(cvs->dev, "%s:Firmware flash hostwake error after reset",
+				__func__);
 	}
 
 	dev_info(cvs->dev, "%s:Exit with status:0x%x", __func__, status);
@@ -454,12 +489,16 @@ xit:
 	 */
 	if (ctx->icvs_sensor_state != CV_SENSOR_VISION_ACQUIRED_STATE &&
 		!ctx->cv_suspend) {
+		if (cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0))
+			dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
 		if (cvs_acquire_camera_sensor_internal()) {
 			dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
 		} else {
 			ctx->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;
 			dev_info(cvs->dev, "%s:Ownership transfer after fw_dl success",
 					 __func__);
+			if (cvs_get_device_cap(&cvs->cv_fw_capability))
+				dev_err(cvs->dev, "%s:Device cap not supported", __func__);
 		}
 	} else {
 		ctx->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;

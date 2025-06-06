@@ -12,6 +12,7 @@
 #include <linux/sysfs.h>
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/vmalloc.h>
 
 #include "cvs_gpio.h"
 #include "intel_cvs_update.h"
@@ -149,8 +150,23 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 			dev_err(icvs->dev, "Failed to initialize\n");
 		find_oem_prod_id(handle, "OPID", &icvs->oem_prod_id);
 	}
-
 	mdelay(FW_PREPARE_MS);
+	ret = cvs_find_magic_num_support(icvs);
+	if (ret)
+		goto exit;
+
+	if (icvs->magic_num_support) {
+		ret = cvs_get_device_cap(&icvs->cv_fw_capability);
+		if (ret)
+			goto exit;
+	}
+
+	ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
+	if (ret) {
+		dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
+		goto exit;
+	}
+
 	ret = cvs_acquire_camera_sensor_internal();
 	if (ret) {
 		dev_err(cvs->dev, "%s:Acquire sensor fail", __func__);
@@ -160,16 +176,6 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 			 __func__);
 	}
 	icvs->icvs_sensor_state = CV_SENSOR_VISION_ACQUIRED_STATE;
-
-	ret = cvs_get_device_cap(&icvs->cv_fw_capability);
-	if (ret)
-		goto exit;
-
-	ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
-	if (ret) {
-		dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
-		goto exit;
-	}
 	acpi_dev_clear_dependencies(ACPI_COMPANION(icvs->dev));
 
 exit:
@@ -210,6 +216,9 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 			}
 			cvs_exit(icvs);
 		}
+		if (cvs->fw_buffer)
+			vfree(cvs->fw_buffer);
+
 		devm_kfree(&i2c->dev, icvs);
 	}
 }
@@ -525,7 +534,7 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 	cvs->fw_buffer_size = fw_bin_size;
 	cvs->max_flashtime_ms = cvs->plugin_to_cvs.max_flash_time;
 	cvs->fw_update_retries = cvs->plugin_to_cvs.max_fwupd_retry_count;
-	cvs->fw_buffer = devm_kzalloc(cvs->dev, cvs->fw_buffer_size, GFP_KERNEL);
+	cvs->fw_buffer = vmalloc(cvs->fw_buffer_size);
 
 	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
 		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);

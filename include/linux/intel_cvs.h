@@ -137,7 +137,7 @@ struct cvs_to_plugin_interface {
 	u16 pid;
 	int opid;
 	int dev_capabilities;
-};
+} __packed;
 
 /* Params updated by CVS plugin */
 struct plugin_to_cvs_interface {
@@ -145,7 +145,7 @@ struct plugin_to_cvs_interface {
 	int max_flash_time; /*milli sec*/
 	int max_fwupd_retry_count;
 	int fw_bin_fd; /*file descriptor*/
-};
+} __packed;
 
 /* FW update status Info */
 struct ctrl_data_fwupd {
@@ -157,7 +157,7 @@ struct ctrl_data_fwupd {
 	bool fw_dl_finshed;
 	/* 0:PASS, Non-zero error code. Read only after fw_dl finished=1 */
 	int fw_dl_status_code;
-};
+} __packed;
 
 struct intel_cvs {
 	struct device *dev;

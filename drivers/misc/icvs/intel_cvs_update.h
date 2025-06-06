@@ -11,6 +11,7 @@
 int cvs_reset_cv_device(void);
 void cvs_fw_dl_thread(struct work_struct *arg);
 int cvs_get_fwver_vid_pid(void);
+int cvs_find_magic_num_support(struct intel_cvs *ctx);
 
 int cvs_acquire_camera_sensor_internal(void);
 int cvs_release_camera_sensor_internal(void);

@@ -214,6 +214,14 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 				dev_info(cvs->dev, "%s:cvs_fw_dl_thread() stopped", __func__);
 				mdelay(WAIT_HOST_RELEASE_MS);
 			}
+			
+			/* reset vision chip */
+			if (cvs_reset_cv_device()) {
+				dev_err(cvs->dev, "%s:CV reset fail after flash", __func__);
+				return;
+			}
+			cvs->icvs_state = CV_INIT_STATE;
+	
 			cvs_exit(icvs);
 		}
 		if (cvs->fw_buffer)

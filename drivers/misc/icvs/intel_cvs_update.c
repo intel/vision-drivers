@@ -405,21 +405,6 @@ int cvs_dev_fw_dl(void)
 							 cvs->lvfs_fwdl_complete_event_arg == 1);
 	cvs->lvfs_fwdl_complete_event_arg = 0;
 
-	if (!ctx->cv_suspend) {
-		/* reset vision chip */
-		if (cvs_reset_cv_device()) {
-			dev_err(cvs->dev, "%s:CV reset fail after flash", __func__);
-			return -EIO;
-		}
-		ctx->icvs_state = CV_INIT_STATE;
-		ctx->icvs_sensor_state = CV_SENSOR_RELEASED_STATE;
-
-		//wait for the host_wake
-		if (cvs_wait_for_host_wake(WAIT_HOST_WAKE_RESET_MS))
-			dev_info(cvs->dev, "%s:Firmware flash hostwake error after reset",
-				__func__);
-	}
-
 	dev_info(cvs->dev, "%s:Exit with status:0x%x", __func__, status);
 	return status;
 }

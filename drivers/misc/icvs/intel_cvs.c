@@ -8,6 +8,7 @@
 #include <linux/acpi.h>
 #include <linux/intel_cvs.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/sysfs.h>
 #include <linux/fs.h>
@@ -62,23 +63,29 @@ static int find_oem_prod_id(acpi_handle handle, const char *method_name,
 	return 0;
 }
 
-static int cvs_i2c_probe(struct i2c_client *i2c)
+static int cvs_common_probe(struct device *dev, bool is_i2c)
 {
 	struct intel_cvs *icvs;
 	acpi_handle handle;
 	int ret = -ENODEV;
 
-	if (!i2c) {
-		pr_err("No I2C device");
+	if (!dev)
 		return -ENODEV;
-	}
 
-	dev_info(&i2c->dev, "%s with i2c_client:%p\n", __func__, i2c);
-	icvs = devm_kzalloc(&i2c->dev, sizeof(struct intel_cvs), GFP_KERNEL);
+	icvs = devm_kzalloc(dev, sizeof(struct intel_cvs), GFP_KERNEL);
 	if (!icvs)
 		return -ENOMEM;
-	icvs->dev = &i2c->dev;
-	i2c_set_clientdata(i2c, icvs);
+	icvs->dev = dev;
+	icvs->has_i2c = is_i2c;
+	if (is_i2c) {
+		struct i2c_client *i2c = to_i2c_client(dev);
+		i2c_set_clientdata(i2c, icvs);
+		dev_set_drvdata(dev, icvs);
+		dev_info(dev, "%s: probed as i2c device", __func__);
+	} else {
+		dev_set_drvdata(dev, icvs);
+		dev_info(dev, "%s: probed as platform device (GPIO-only)", __func__);
+	}
 	cvs = icvs;
 
 	ret = gpiod_count(icvs->dev, NULL);
@@ -145,26 +152,28 @@ static int cvs_i2c_probe(struct i2c_client *i2c)
 		init_waitqueue_head(&icvs->lvfs_fwdl_complete_event);
 		icvs->fw_dl_task_finished = false;
 
-		ret = cvs_init(icvs);
-		if (ret)
-			dev_err(icvs->dev, "Failed to initialize\n");
+		if (icvs->has_i2c) {
+			ret = cvs_init(icvs);
+			if (ret)
+				dev_err(icvs->dev, "Failed to initialize\n");
 
-		find_oem_prod_id(handle, "OPID", &icvs->oem_prod_id);
+			find_oem_prod_id(handle, "OPID", &icvs->oem_prod_id);
 
-		ret = cvs_find_magic_num_support(icvs);
-		if (ret)
-			goto exit;
-
-		if (icvs->magic_num_support) {
-			ret = cvs_get_device_cap(&icvs->cv_fw_capability);
+			ret = cvs_find_magic_num_support(icvs);
 			if (ret)
 				goto exit;
-		}
 
-		ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
-		if (ret) {
-			dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
-			goto exit;
+			if (icvs->magic_num_support) {
+				ret = cvs_get_device_cap(&icvs->cv_fw_capability);
+				if (ret)
+					goto exit;
+			}
+
+			ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
+			if (ret) {
+				dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
+				goto exit;
+			}
 		}
 	}
 
@@ -189,18 +198,31 @@ exit:
 	return ret;
 }
 
+static int cvs_i2c_probe(struct i2c_client *i2c)
+{
+	return cvs_common_probe(&i2c->dev, true);
+}
+
+static int cvs_platform_probe(struct platform_device *pdev)
+{
+	return cvs_common_probe(&pdev->dev, false);
+}
+
 static void cvs_exit(struct intel_cvs *icvs)
 {
 	if (icvs && icvs->dev && icvs->rst)
 		devm_free_irq(icvs->dev, icvs->irq, icvs);
 }
 
-static void cvs_i2c_remove(struct i2c_client *i2c)
+static void cvs_common_remove(struct device *dev, bool is_i2c)
 {
-	struct intel_cvs *icvs;
-
-	dev_info(&i2c->dev, "%s\n", __func__);
-	icvs = i2c_get_clientdata(i2c);
+	struct intel_cvs *icvs = dev_get_drvdata(dev);
+	if (is_i2c) {
+		dev_info(dev, "%s (i2c)\n", __func__);
+		icvs = i2c_get_clientdata(to_i2c_client(dev));
+	} else {
+		dev_info(dev, "%s (platform)\n", __func__);
+	}
 	if (icvs) {
 		cvs->close_fw_dl_task = true;
 
@@ -231,13 +253,25 @@ static void cvs_i2c_remove(struct i2c_client *i2c)
 		if (cvs->fw_buffer)
 			vfree(cvs->fw_buffer);
 
-		devm_kfree(&i2c->dev, icvs);
+		devm_kfree(dev, icvs);
 	}
+}
+
+static void cvs_i2c_remove(struct i2c_client *i2c)
+{
+	cvs_common_remove(&i2c->dev, true);
+}
+
+static void cvs_platform_remove(struct platform_device *pdev)
+{
+	cvs_common_remove(&pdev->dev, false);
 }
 
 int cvs_read_i2c(u16 cmd, char *data, int size)
 {
 	struct intel_cvs *ctx = cvs;
+	if (!ctx || !ctx->has_i2c)
+		return -EOPNOTSUPP;
 	struct i2c_client *i2c = container_of(cvs->dev, struct i2c_client, dev);
 	int cnt;
 	char *in_data;
@@ -696,21 +730,38 @@ static struct i2c_driver cvs_i2c_driver = {
 	.remove = cvs_i2c_remove
 };
 
+static struct platform_driver cvs_platform_driver = {
+	.probe	= cvs_platform_probe,
+	.remove	= cvs_platform_remove,
+	.driver = {
+		.name = "intel-cvs-platform",
+		.acpi_match_table = ACPI_PTR(acpi_cvs_ids),
+		.dev_groups = cvs_groups,
+		.pm = pm_ptr(ICVS_DEV_PM_OPS),
+	},
+};
+
 static int __init icvs_init(void)
 {
-	int ret;
+	int ret, pret;
 
 	ret = i2c_add_driver(&cvs_i2c_driver);
-	if (ret != 0)
+	if (ret)
 		pr_err("Failed to register I2C driver: %d\n", ret);
 
-	return ret;
+	pret = platform_driver_register(&cvs_platform_driver);
+	if (pret)
+		pr_err("Failed to register platform driver: %d\n", pret);
+
+	/* Return 0 if at least one succeeds */
+	return (ret && pret) ? ret : 0;
 }
 module_init(icvs_init);
 
 static void __exit icvs_exit(void)
 {
 	i2c_del_driver(&cvs_i2c_driver);
+	platform_driver_unregister(&cvs_platform_driver);
 }
 module_exit(icvs_exit);
 

@@ -12,6 +12,8 @@ extern struct intel_cvs *cvs;
 int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 {
 	struct intel_cvs *ctx = cvs;
+	if (!ctx || !ctx->has_i2c)
+		return -EOPNOTSUPP;
 	struct i2c_client *client =
 		container_of(cvs->dev, struct i2c_client, dev);
 	int count;
@@ -76,6 +78,8 @@ int cvs_get_device_state(u8 *cv_fw_state)
 {
 	if (!cvs)
 		return -EINVAL;
+	if (!cvs->has_i2c)
+		return -EOPNOTSUPP;
 
 	if (cvs_read_i2c(GET_DEVICE_STATE, cv_fw_state, sizeof(char)) <= 0) {
 		dev_err(cvs->dev, "%s:cvs_read_i2c() failed", __func__);
@@ -95,6 +99,8 @@ int cvs_get_device_cap(struct cv_ver_capability *cv_fw_cap)
 {
 	if (!cvs)
 		return -EINVAL;
+	if (!cvs->has_i2c)
+		return -EOPNOTSUPP;
 	cvs->magic_num_support = true;
 
 	if (cvs_read_i2c(GET_DEV_CAPABILITY, (char *)cv_fw_cap,
@@ -120,6 +126,12 @@ int cvs_get_device_cap(struct cv_ver_capability *cv_fw_cap)
 
 int cvs_find_magic_num_support(struct intel_cvs *ctx)
 {
+	if (!ctx || !ctx->has_i2c) {
+		/* fall back to legacy protocol assumptions */
+		if (ctx)
+			ctx->magic_num_support = false;
+		return 0;
+	}
 	struct i2c_client *i2c = container_of(ctx->dev, struct i2c_client, dev);
 	int cnt;
 	u16 cmd = GET_VID_PID;
@@ -183,6 +195,8 @@ int cvs_dev_fw_dl_start(void)
 {
 	struct intel_cvs *ctx = cvs;
 	u8 fw_state = 0;
+	if (!ctx->has_i2c)
+		return -EOPNOTSUPP;
 
 	/* check CV FW state */
 	if (cvs_get_device_state(&fw_state)) {
@@ -218,6 +232,8 @@ int cvs_dev_fw_dl_data(void)
 {
 	int status = 0;
 	struct intel_cvs *ctx = cvs;
+	if (!ctx->has_i2c)
+		return -EOPNOTSUPP;
 	u8 fw_state = DEVICE_DWNLD_STATE_MASK;
 	u8 *fw_buff_ptr = NULL;
 	u32 fw_size = 0;
@@ -333,6 +349,8 @@ int cvs_dev_fw_dl_end(void)
 {
 	struct intel_cvs *ctx = cvs;
 	u8 fw_state = 0;
+	if (!ctx->has_i2c)
+		return -EOPNOTSUPP;
 
 	if (cvs_write_i2c(FW_LOADER_END, NULL, 0)) {
 		dev_err(cvs->dev, "%s:fw_loader_end failed", __func__);
@@ -358,6 +376,8 @@ int cvs_dev_fw_dl(void)
 {
 	int status = 0;
 	struct intel_cvs *ctx = cvs;
+	if (!ctx->has_i2c)
+		return -EOPNOTSUPP;
 	u8 fw_state = 0;
 
 	dev_info(cvs->dev, "%s:Enter", __func__);
@@ -413,6 +433,8 @@ int cvs_get_fwver_vid_pid(void)
 {
 	if (!cvs)
 		return -EINVAL;
+	if (!cvs->has_i2c)
+		return -EOPNOTSUPP;
 
 	if (cvs_read_i2c(GET_FW_VERSION, (char *)&cvs->ver,
 					 sizeof(struct cvs_fw)) <= 0)
@@ -431,6 +453,11 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 	u8 fw_state = 0;
 	u32 fw_size = 0;
 	struct intel_cvs *ctx = cvs;
+	if (ctx && !ctx->has_i2c) {
+		/* Nothing to do, just mark finished */
+		ctx->fw_dl_task_finished = true;
+		return;
+	}
 
 	if (IS_ERR_OR_NULL(ctx)) {
 		dev_err(cvs->dev, "%s:Invalid ctx. Exit firmware download", __func__);

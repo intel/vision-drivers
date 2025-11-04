@@ -69,9 +69,6 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 	acpi_handle handle;
 	int ret = -ENODEV;
 
-	if (!dev)
-		return -ENODEV;
-
 	icvs = devm_kzalloc(dev, sizeof(struct intel_cvs), GFP_KERNEL);
 	if (!icvs)
 		return -ENOMEM;
@@ -649,11 +646,19 @@ ATTRIBUTE_GROUPS(cvs);
 #ifdef CONFIG_PM
 static int cvs_suspend(struct device *dev)
 {
-	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
-	struct intel_cvs *icvs = i2c_get_clientdata(i2c);
+	struct intel_cvs *icvs = dev_get_drvdata(dev);
 	int ret = 0;
 
-	dev_info(icvs->dev, "%s:entered\n", __func__);
+	if (!icvs)
+		return 0; /* Nothing bound */
+
+	/* Platform (GPIO-only) variant: no I2C resources to manage */
+	if (!icvs->has_i2c) {
+		dev_dbg(dev, "%s: platform(no-i2c) skip suspend", __func__);
+		return 0;
+	}
+
+	dev_info(icvs->dev, "%s:entered", __func__);
 	if (icvs->cap == ICVS_FULLCAP && cvs->fw_dl_task_finished != true) {
 		icvs->cv_suspend = true;
 		cvs->close_fw_dl_task = true;
@@ -665,10 +670,8 @@ static int cvs_suspend(struct device *dev)
 		dev_info(icvs->dev, "%s:fw update cancelled", __func__);
 	}
 
-	if (icvs->cap == ICVS_FULLCAP) {
-		/* Disable IRQ */
+	if (icvs->cap == ICVS_FULLCAP && icvs->irq > 0)
 		disable_irq(icvs->irq);
-	}
 
 	dev_info(icvs->dev, "%s:completed", __func__);
 	return ret;
@@ -676,23 +679,28 @@ static int cvs_suspend(struct device *dev)
 
 static int cvs_resume(struct device *dev)
 {
-	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
-	struct intel_cvs *icvs = i2c_get_clientdata(i2c);
+	struct intel_cvs *icvs = dev_get_drvdata(dev);
 	int val = -1;
 
-	dev_info(icvs->dev, "%s entered", __func__);
-	/* Check if bridge is ready */
+	if (!icvs)
+		return 0;
+
+	/* Always check GPIO response even for platform (no-i2c) variant */
+	dev_info(dev, "%s entered", __func__);
 	val = gpiod_get_value_cansleep(icvs->resp);
 	if (val != 0)
-		dev_err(icvs->dev, "%s:Wrong gpio_response val:%x read via bridge",
-				__func__, val);
+		dev_err(dev, "%s:Wrong gpio_response val:%x read via bridge",
+			__func__, val);
+
+	if (!icvs->has_i2c)
+		return 0; /* Skip I2C / IRQ resume parts */
 
 	if (icvs->cap == ICVS_FULLCAP) {
 		icvs->cv_suspend = false;
 		icvs->close_fw_dl_task = false;
 
-		/* Start IRQ */
-		enable_irq(icvs->irq);
+		if (icvs->irq > 0)
+			enable_irq(icvs->irq);
 		if (cvs->fw_dl_task_started && !cvs->fw_dl_task_finished) {
 			schedule_work(&icvs->fw_dl_task);
 			cvs->fw_dl_task_started = true;
@@ -731,30 +739,32 @@ static struct i2c_driver cvs_i2c_driver = {
 };
 
 static struct platform_driver cvs_platform_driver = {
-	.probe	= cvs_platform_probe,
-	.remove	= cvs_platform_remove,
 	.driver = {
-		.name = "intel-cvs-platform",
+		.name = "Intel CVS driver",
 		.acpi_match_table = ACPI_PTR(acpi_cvs_ids),
 		.dev_groups = cvs_groups,
 		.pm = pm_ptr(ICVS_DEV_PM_OPS),
 	},
+	.probe	= cvs_platform_probe,
+	.remove	= cvs_platform_remove,
 };
 
 static int __init icvs_init(void)
 {
-	int ret, pret;
+	int ret = i2c_add_driver(&cvs_i2c_driver);
 
-	ret = i2c_add_driver(&cvs_i2c_driver);
-	if (ret)
+	if (ret) {
 		pr_err("Failed to register I2C driver: %d\n", ret);
+		return ret;
+	}
 
-	pret = platform_driver_register(&cvs_platform_driver);
-	if (pret)
-		pr_err("Failed to register platform driver: %d\n", pret);
+	ret = platform_driver_register(&cvs_platform_driver);
+	if (ret) {
+		i2c_del_driver(&cvs_i2c_driver);
+		pr_err("Failed to register platform driver: %d\n", ret);
+	}
 
-	/* Return 0 if at least one succeeds */
-	return (ret && pret) ? ret : 0;
+	return ret;
 }
 module_init(icvs_init);
 

@@ -161,6 +161,12 @@ struct ctrl_data_fwupd {
 
 struct intel_cvs {
 	struct device *dev;
+	/* True when device was enumerated as an I2C client and all I2C
+	 * transactions are allowed. False when enumerated as a platform
+	 * device (no I2C resources) and only GPIO based ownership control
+	 * is supported. All I2C helpers must early-return in that case.
+	 */
+	bool has_i2c;
 	enum icvs_cap cap;
 
 	int irq;

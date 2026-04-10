@@ -723,6 +723,7 @@ static struct acpi_device_id acpi_cvs_ids[] = { { "INTC10CF" }, /* MTL */
 						{ "INTC10DE" }, /* LNL */
 						{ "INTC10E0" }, /* ARL */
 						{ "INTC10E1" }, /* PTL */
+						{ "INTC10FA" }, /*NVL */
 						{ /* END OF LIST */ } };
 MODULE_DEVICE_TABLE(acpi, acpi_cvs_ids);
 

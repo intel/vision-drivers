@@ -166,10 +166,12 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 					goto exit;
 			}
 
-			ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
-			if (ret) {
-				dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
-				goto exit;
+			if (icvs->magic_num_support) {
+				ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
+				if (ret) {
+					dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
+					goto exit;
+				}
 			}
 		}
 	}

@@ -66,7 +66,6 @@ static int find_oem_prod_id(acpi_handle handle, const char *method_name,
 static int cvs_common_probe(struct device *dev, bool is_i2c)
 {
 	struct intel_cvs *icvs;
-	acpi_handle handle;
 	int ret = -ENODEV;
 
 	icvs = devm_kzalloc(dev, sizeof(struct intel_cvs), GFP_KERNEL);
@@ -151,10 +150,12 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 
 		if (icvs->has_i2c) {
 			ret = cvs_init(icvs);
-			if (ret)
+			if (ret) {
 				dev_err(icvs->dev, "Failed to initialize\n");
+				goto exit;
+			}
 
-			find_oem_prod_id(handle, "OPID", &icvs->oem_prod_id);
+			find_oem_prod_id(ACPI_HANDLE(icvs->dev), "OPID", &icvs->oem_prod_id);
 
 			ret = cvs_find_magic_num_support(icvs);
 			if (ret)
@@ -164,12 +165,12 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 				ret = cvs_get_device_cap(&icvs->cv_fw_capability);
 				if (ret)
 					goto exit;
-			}
 
-			ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
-			if (ret) {
-				dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
-				goto exit;
+				ret = cvs_write_i2c(SET_HOST_IDENTIFIER, NULL, 0);
+				if (ret) {
+					dev_err(cvs->dev, "%s:set_host_identifier cmd failed", __func__);
+					goto exit;
+				}
 			}
 		}
 	}

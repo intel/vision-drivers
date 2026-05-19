@@ -73,6 +73,19 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 		return -ENOMEM;
 	icvs->dev = dev;
 	icvs->has_i2c = is_i2c;
+
+	/*
+	 * Initialize synchronisation primitives unconditionally so sysfs
+	 * handlers and the remove path are safe regardless of capability
+	 * (LIGHTCAP devices never reach the FULLCAP branch below).
+	 */
+	spin_lock_init(&icvs->buffer_lock);
+	INIT_WORK(&icvs->fw_dl_task, cvs_fw_dl_thread);
+	init_waitqueue_head(&icvs->hostwake_event);
+	init_waitqueue_head(&icvs->update_complete_event);
+	init_waitqueue_head(&icvs->lvfs_fwdl_complete_event);
+	icvs->fw_dl_task_finished = false;
+
 	if (is_i2c) {
 		struct i2c_client *i2c = to_i2c_client(dev);
 		i2c_set_clientdata(i2c, icvs);
@@ -141,12 +154,6 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 			ret = -EINVAL;
 			goto exit;
 		}
-
-		INIT_WORK(&icvs->fw_dl_task, cvs_fw_dl_thread);
-		init_waitqueue_head(&icvs->hostwake_event);
-		init_waitqueue_head(&icvs->update_complete_event);
-		init_waitqueue_head(&icvs->lvfs_fwdl_complete_event);
-		icvs->fw_dl_task_finished = false;
 
 		if (icvs->has_i2c) {
 			ret = cvs_init(icvs);
@@ -505,9 +512,11 @@ static ssize_t cvs_ctrl_data_pre_show(struct device *dev,
 	}
 
 	count = sizeof(struct cvs_to_plugin_interface);
-	memset(&cvs->info_fwupd, 0, sizeof(struct ctrl_data_fwupd));
-	cvs->fw_dl_task_finished = false;
-	cvs->fw_dl_task_started = false;
+
+	if (cvs->cap != ICVS_FULLCAP) {
+		dev_err(cvs->dev, "%s:FW update not supported on LIGHTCAP", __func__);
+		return -EOPNOTSUPP;
+	}
 
 	if (cvs_get_fwver_vid_pid()) {
 		dev_err(cvs->dev, "%s:Not able to read vid/pid", __func__);
@@ -546,6 +555,11 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 	if (!buf) {
 		dev_err(cvs->dev, "%s:buff is null", __func__);
 		return -EINVAL;
+	}
+
+	if (cvs->cap != ICVS_FULLCAP) {
+		dev_err(cvs->dev, "%s:FW update not supported on LIGHTCAP", __func__);
+		return -EOPNOTSUPP;
 	}
 
 	if (count == 0 || count != sizeof(struct plugin_to_cvs_interface)) {

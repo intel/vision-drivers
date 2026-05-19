@@ -162,7 +162,13 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 				goto exit;
 			}
 
-			find_oem_prod_id(ACPI_HANDLE(icvs->dev), "OPID", &icvs->oem_prod_id);
+			/*
+			 * ACPI_HANDLE() returns NULL on non-ACPI platforms;
+			 * passing NULL to acpi_evaluate_integer() oopses.
+			 */
+			if (ACPI_HANDLE(icvs->dev))
+				find_oem_prod_id(ACPI_HANDLE(icvs->dev), "OPID",
+						 &icvs->oem_prod_id);
 
 			ret = cvs_find_magic_num_support(icvs);
 			if (ret)

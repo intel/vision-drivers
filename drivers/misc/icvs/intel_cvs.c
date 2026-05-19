@@ -203,8 +203,15 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 	acpi_dev_clear_dependencies(ACPI_COMPANION(icvs->dev));
 
 exit:
-	if (ret)
+	if (ret) {
+		/*
+		 * cvs was assigned early in probe before we knew whether
+		 * initialisation would succeed.  Clear it now so no other
+		 * code path dereferences the about-to-be-freed struct.
+		 */
+		cvs = NULL;
 		devm_kfree(icvs->dev, icvs);
+	}
 
 	return ret;
 }
@@ -252,19 +259,30 @@ static void cvs_common_remove(struct device *dev, bool is_i2c)
 				mdelay(WAIT_HOST_RELEASE_MS);
 			}
 
-			/* reset vision chip */
-			if (cvs_reset_cv_device()) {
+			/*
+			 * Guarantee the work item is not queued or running before
+			 * we free the struct.  The signal+wait above handles the
+			 * running case; cancel_work_sync() catches the race where
+			 * fw_dl_task_started was never set but the work was already
+			 * enqueued.
+			 */
+			cancel_work_sync(&icvs->fw_dl_task);
+
+			/* reset vision chip; log but do not abort cleanup on failure */
+			if (cvs_reset_cv_device())
 				dev_err(cvs->dev, "%s:CV reset fail after flash", __func__);
-				return;
-			}
+
 			cvs->icvs_state = CV_INIT_STATE;
 
 			cvs_exit(icvs);
 		}
-		if (cvs->fw_buffer)
+		if (cvs->fw_buffer) {
 			vfree(cvs->fw_buffer);
+			cvs->fw_buffer = NULL;
+		}
 
 		devm_kfree(dev, icvs);
+		cvs = NULL;  /* prevent use-after-free via the global pointer */
 	}
 }
 
@@ -582,6 +600,16 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 		dev_err(cvs->dev, "%s:Wrong count:%x", __func__, (unsigned int)count);
 		return -EINVAL;
 	}
+
+	/*
+	 * Reset download tracking state here (at the start of a new update
+	 * request) rather than in the show handler.  Resetting in show means
+	 * any concurrent read (even an unprivileged one) silently zeroes
+	 * in-flight progress counters and triggers a spurious re-download.
+	 */
+	memset(&cvs->info_fwupd, 0, sizeof(struct ctrl_data_fwupd));
+	cvs->fw_dl_task_finished = false;
+	cvs->fw_dl_task_started = false;
 
 	spin_lock_irqsave(&cvs->buffer_lock, flags);
 	memcpy(&cvs->plugin_to_cvs, buf, count);

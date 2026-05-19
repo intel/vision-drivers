@@ -258,6 +258,18 @@ int cvs_dev_fw_dl_data(void)
 	dev_info(cvs->dev, "%s:Enter", __func__);
 
 	fw_buff_ptr = (u8 *)ctx->fw_buffer + FW_BIN_HDR_SIZE;
+
+	/*
+	 * fw_buffer_size is u32; subtracting FW_BIN_HDR_SIZE without
+	 * checking wraps to a huge value and causes an out-of-bounds read
+	 * over the entire vmalloc'd buffer.
+	 */
+	if (ctx->fw_buffer_size <= FW_BIN_HDR_SIZE) {
+		dev_err(cvs->dev, "%s:fw image too small (%u bytes)", __func__,
+				ctx->fw_buffer_size);
+		kfree(out_buf);
+		return -EINVAL;
+	}
 	fw_size = ctx->fw_buffer_size - FW_BIN_HDR_SIZE;
 
 	while ((fw_size > 0) && (ctx->icvs_state != CV_STOPPING)) {
@@ -333,7 +345,8 @@ i2c_packet_loop_end:
 			goto err_exit;
 		}
 		ctx->info_fwupd.num_packets_sent++;
-		fw_size -= I2C_PKT_SIZE;
+		/* min_t prevents u32 underflow on the last (short) chunk */
+		fw_size -= min_t(u32, fw_size, I2C_PKT_SIZE);
 		fw_buff_ptr += I2C_PKT_SIZE;
 		ctx->cv_fw_state = fw_state;
 	}
@@ -466,6 +479,11 @@ void cvs_fw_dl_thread(struct work_struct *arg)
 		return;
 	}
 
+	if (ctx->fw_buffer_size <= FW_BIN_HDR_SIZE) {
+		dev_err(cvs->dev, "%s:fw image too small (%u bytes)", __func__,
+				ctx->fw_buffer_size);
+		goto xit;
+	}
 	fw_size = ctx->fw_buffer_size - FW_BIN_HDR_SIZE;
 	ctx->info_fwupd.total_packets = fw_size / I2C_PKT_SIZE;
 	ctx->info_fwupd.total_packets += (fw_size % I2C_PKT_SIZE) ? 1 : 0;

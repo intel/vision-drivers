@@ -565,7 +565,7 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 {
 	unsigned long flags;
 	struct file *f;
-	int fw_bin_size;
+	loff_t fw_bin_size;
 	ssize_t bytes_read = 0;
 
 	if (!buf) {
@@ -600,12 +600,25 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 		return -EBADF;
 	}
 
-	fw_bin_size = generic_file_llseek(f, 0, SEEK_END);
-	dev_dbg(cvs->dev, "%s:Calculated fw_bin size:%x bytes",
-			__func__, fw_bin_size);
-	generic_file_llseek(f, -fw_bin_size, SEEK_CUR);
+	/*
+	 * generic_file_llseek() returns loff_t; assigning to int silently
+	 * truncates files larger than 2 GiB and produces a wrong (positive)
+	 * seek-back offset.  Use vfs_llseek() + loff_t throughout, and treat
+	 * a non-positive size as an error rather than seeking backwards.
+	 */
+	fw_bin_size = vfs_llseek(f, 0, SEEK_END);
+	if (fw_bin_size <= 0) {
+		dev_err(cvs->dev, "%s:Failed to determine fw file size: %lld",
+				__func__, fw_bin_size);
+		fput(f);
+		return fw_bin_size < 0 ? (ssize_t)fw_bin_size : -EINVAL;
+	}
+	vfs_llseek(f, 0, SEEK_SET);
 
-	cvs->fw_buffer_size = fw_bin_size;
+	dev_dbg(cvs->dev, "%s:Calculated fw_bin size:%llx bytes",
+			__func__, fw_bin_size);
+
+	cvs->fw_buffer_size = (u32)fw_bin_size;
 	cvs->max_flashtime_ms = cvs->plugin_to_cvs.max_flash_time;
 	cvs->fw_update_retries = cvs->plugin_to_cvs.max_fwupd_retry_count;
 

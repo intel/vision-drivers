@@ -43,8 +43,9 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 		u8 *out_buff;
 		union cv_host_identifiers host_identifiers;
 
-		out_buff = devm_kzalloc(ctx->dev,
-					cv_host_identifier_size + sizeof(cmd), GFP_KERNEL);
+		/* Use kzalloc; devm_kzalloc leaks on every call until removal */
+		out_buff = kzalloc(cv_host_identifier_size + sizeof(cmd),
+				   GFP_KERNEL);
 		if (!out_buff) {
 			dev_err(cvs->dev, "%s:Buffer alloc failed", __func__);
 			return -ENOMEM;
@@ -61,6 +62,7 @@ int cvs_write_i2c(u16 cmd, u8 *data, u32 len)
 
 		count = i2c_master_send(client, (const char *)out_buff,
 					sizeof(cmd) + cv_host_identifier_size);
+		kfree(out_buff);
 
 		if (count != cv_host_identifier_size + sizeof(cmd))
 			return -EIO;

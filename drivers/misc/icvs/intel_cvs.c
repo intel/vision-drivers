@@ -281,21 +281,19 @@ static void cvs_platform_remove(struct platform_device *pdev)
 int cvs_read_i2c(u16 cmd, char *data, int size)
 {
 	struct intel_cvs *ctx = cvs;
+	struct i2c_client *i2c;
+	u16 cvs_cmd;
+	int cnt;
+
 	if (!ctx || !ctx->has_i2c)
 		return -EOPNOTSUPP;
-	struct i2c_client *i2c = container_of(cvs->dev, struct i2c_client, dev);
-	int cnt;
-	char *in_data;
 
-	in_data = devm_kzalloc(ctx->dev, (CVMAGICNUMSIZE + size), GFP_KERNEL);
-	if (!in_data) {
-		dev_err(cvs->dev, "%s:Buffer allocation failed", __func__);
-		return -ENOMEM;
-	}
-	u16 cvs_cmd = (((cmd) >> 8) & 0x00ff) | (((cmd) << 8) & 0xff00);
-
+	/* Validate before any allocation */
 	if (size < 0 || !data)
 		return -EINVAL;
+
+	i2c = container_of(cvs->dev, struct i2c_client, dev);
+	cvs_cmd = (((cmd) >> 8) & 0x00ff) | (((cmd) << 8) & 0xff00);
 
 	cnt = i2c_master_send(i2c, (const char *)&cvs_cmd, sizeof(u16));
 	if (cnt != sizeof(u16)) {
@@ -305,17 +303,29 @@ int cvs_read_i2c(u16 cmd, char *data, int size)
 	}
 
 	if (ctx->magic_num_support) {
+		/*
+		 * Use kzalloc for the per-call receive buffer; devm_kzalloc
+		 * retains every allocation until device removal, so calling
+		 * this function repeatedly leaks device-managed memory
+		 * without bound.
+		 */
+		char *in_data = kzalloc(CVMAGICNUMSIZE + size, GFP_KERNEL);
 		u32 magic_num_received;
 
+		if (!in_data) {
+			dev_err(cvs->dev, "%s:Buffer allocation failed", __func__);
+			return -ENOMEM;
+		}
 		cnt = i2c_master_recv(i2c, in_data, size + CVMAGICNUMSIZE);
 		magic_num_received = ((u32 *)in_data)[0];
-		if (magic_num_received ==  CVMAGICNUM) {
+		if (magic_num_received == CVMAGICNUM) {
 			dev_dbg(&i2c->dev, "%s:Valid magic number", __func__);
 			memcpy(data, in_data + CVMAGICNUMSIZE, size);
 		} else {
 			dev_dbg(&i2c->dev, "%s:Invalid magic number", __func__);
-			return -EIO;
+			cnt = -EIO;
 		}
+		kfree(in_data);
 	} else {
 		cnt = i2c_master_recv(i2c, (char *)data, size);
 	}
@@ -598,9 +608,15 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 	cvs->fw_buffer_size = fw_bin_size;
 	cvs->max_flashtime_ms = cvs->plugin_to_cvs.max_flash_time;
 	cvs->fw_update_retries = cvs->plugin_to_cvs.max_fwupd_retry_count;
+
+	/* Free any buffer left over from a previous (possibly failed) update */
+	if (cvs->fw_buffer) {
+		vfree(cvs->fw_buffer);
+		cvs->fw_buffer = NULL;
+	}
 	cvs->fw_buffer = vmalloc(cvs->fw_buffer_size);
 
-	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
+	if (!cvs->fw_buffer) {
 		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);
 		fput(f);
 		return -ENOMEM;
@@ -614,6 +630,9 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 	if (bytes_read != cvs->fw_buffer_size) {
 		dev_err(cvs->dev, "%s:kernel_read failed with bytes_read:%lx",
 				__func__, bytes_read);
+		/* Free the buffer to avoid leaving stale data on retry */
+		vfree(cvs->fw_buffer);
+		cvs->fw_buffer = NULL;
 		return -EIO;
 	} else {
 		dev_info(cvs->dev, "%s:Full fw_buffer received. Start fw_download",

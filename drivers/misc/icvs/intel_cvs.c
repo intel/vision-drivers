@@ -73,6 +73,19 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 		return -ENOMEM;
 	icvs->dev = dev;
 	icvs->has_i2c = is_i2c;
+
+	/*
+	 * Initialize synchronisation primitives unconditionally so sysfs
+	 * handlers and the remove path are safe regardless of capability
+	 * (LIGHTCAP devices never reach the FULLCAP branch below).
+	 */
+	spin_lock_init(&icvs->buffer_lock);
+	INIT_WORK(&icvs->fw_dl_task, cvs_fw_dl_thread);
+	init_waitqueue_head(&icvs->hostwake_event);
+	init_waitqueue_head(&icvs->update_complete_event);
+	init_waitqueue_head(&icvs->lvfs_fwdl_complete_event);
+	icvs->fw_dl_task_finished = false;
+
 	if (is_i2c) {
 		struct i2c_client *i2c = to_i2c_client(dev);
 		i2c_set_clientdata(i2c, icvs);
@@ -142,12 +155,6 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 			goto exit;
 		}
 
-		INIT_WORK(&icvs->fw_dl_task, cvs_fw_dl_thread);
-		init_waitqueue_head(&icvs->hostwake_event);
-		init_waitqueue_head(&icvs->update_complete_event);
-		init_waitqueue_head(&icvs->lvfs_fwdl_complete_event);
-		icvs->fw_dl_task_finished = false;
-
 		if (icvs->has_i2c) {
 			ret = cvs_init(icvs);
 			if (ret) {
@@ -155,7 +162,13 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 				goto exit;
 			}
 
-			find_oem_prod_id(ACPI_HANDLE(icvs->dev), "OPID", &icvs->oem_prod_id);
+			/*
+			 * ACPI_HANDLE() returns NULL on non-ACPI platforms;
+			 * passing NULL to acpi_evaluate_integer() oopses.
+			 */
+			if (ACPI_HANDLE(icvs->dev))
+				find_oem_prod_id(ACPI_HANDLE(icvs->dev), "OPID",
+						 &icvs->oem_prod_id);
 
 			ret = cvs_find_magic_num_support(icvs);
 			if (ret)
@@ -190,8 +203,15 @@ static int cvs_common_probe(struct device *dev, bool is_i2c)
 	acpi_dev_clear_dependencies(ACPI_COMPANION(icvs->dev));
 
 exit:
-	if (ret)
+	if (ret) {
+		/*
+		 * cvs was assigned early in probe before we knew whether
+		 * initialisation would succeed.  Clear it now so no other
+		 * code path dereferences the about-to-be-freed struct.
+		 */
+		cvs = NULL;
 		devm_kfree(icvs->dev, icvs);
+	}
 
 	return ret;
 }
@@ -239,19 +259,30 @@ static void cvs_common_remove(struct device *dev, bool is_i2c)
 				mdelay(WAIT_HOST_RELEASE_MS);
 			}
 
-			/* reset vision chip */
-			if (cvs_reset_cv_device()) {
+			/*
+			 * Guarantee the work item is not queued or running before
+			 * we free the struct.  The signal+wait above handles the
+			 * running case; cancel_work_sync() catches the race where
+			 * fw_dl_task_started was never set but the work was already
+			 * enqueued.
+			 */
+			cancel_work_sync(&icvs->fw_dl_task);
+
+			/* reset vision chip; log but do not abort cleanup on failure */
+			if (cvs_reset_cv_device())
 				dev_err(cvs->dev, "%s:CV reset fail after flash", __func__);
-				return;
-			}
+
 			cvs->icvs_state = CV_INIT_STATE;
 
 			cvs_exit(icvs);
 		}
-		if (cvs->fw_buffer)
+		if (cvs->fw_buffer) {
 			vfree(cvs->fw_buffer);
+			cvs->fw_buffer = NULL;
+		}
 
 		devm_kfree(dev, icvs);
+		cvs = NULL;  /* prevent use-after-free via the global pointer */
 	}
 }
 
@@ -268,21 +299,19 @@ static void cvs_platform_remove(struct platform_device *pdev)
 int cvs_read_i2c(u16 cmd, char *data, int size)
 {
 	struct intel_cvs *ctx = cvs;
+	struct i2c_client *i2c;
+	u16 cvs_cmd;
+	int cnt;
+
 	if (!ctx || !ctx->has_i2c)
 		return -EOPNOTSUPP;
-	struct i2c_client *i2c = container_of(cvs->dev, struct i2c_client, dev);
-	int cnt;
-	char *in_data;
 
-	in_data = devm_kzalloc(ctx->dev, (CVMAGICNUMSIZE + size), GFP_KERNEL);
-	if (!in_data) {
-		dev_err(cvs->dev, "%s:Buffer allocation failed", __func__);
-		return -ENOMEM;
-	}
-	u16 cvs_cmd = (((cmd) >> 8) & 0x00ff) | (((cmd) << 8) & 0xff00);
-
+	/* Validate before any allocation */
 	if (size < 0 || !data)
 		return -EINVAL;
+
+	i2c = container_of(cvs->dev, struct i2c_client, dev);
+	cvs_cmd = (((cmd) >> 8) & 0x00ff) | (((cmd) << 8) & 0xff00);
 
 	cnt = i2c_master_send(i2c, (const char *)&cvs_cmd, sizeof(u16));
 	if (cnt != sizeof(u16)) {
@@ -292,17 +321,29 @@ int cvs_read_i2c(u16 cmd, char *data, int size)
 	}
 
 	if (ctx->magic_num_support) {
+		/*
+		 * Use kzalloc for the per-call receive buffer; devm_kzalloc
+		 * retains every allocation until device removal, so calling
+		 * this function repeatedly leaks device-managed memory
+		 * without bound.
+		 */
+		char *in_data = kzalloc(CVMAGICNUMSIZE + size, GFP_KERNEL);
 		u32 magic_num_received;
 
+		if (!in_data) {
+			dev_err(cvs->dev, "%s:Buffer allocation failed", __func__);
+			return -ENOMEM;
+		}
 		cnt = i2c_master_recv(i2c, in_data, size + CVMAGICNUMSIZE);
 		magic_num_received = ((u32 *)in_data)[0];
-		if (magic_num_received ==  CVMAGICNUM) {
+		if (magic_num_received == CVMAGICNUM) {
 			dev_dbg(&i2c->dev, "%s:Valid magic number", __func__);
 			memcpy(data, in_data + CVMAGICNUMSIZE, size);
 		} else {
 			dev_dbg(&i2c->dev, "%s:Invalid magic number", __func__);
-			return -EIO;
+			cnt = -EIO;
 		}
+		kfree(in_data);
 	} else {
 		cnt = i2c_master_recv(i2c, (char *)data, size);
 	}
@@ -505,9 +546,11 @@ static ssize_t cvs_ctrl_data_pre_show(struct device *dev,
 	}
 
 	count = sizeof(struct cvs_to_plugin_interface);
-	memset(&cvs->info_fwupd, 0, sizeof(struct ctrl_data_fwupd));
-	cvs->fw_dl_task_finished = false;
-	cvs->fw_dl_task_started = false;
+
+	if (cvs->cap != ICVS_FULLCAP) {
+		dev_err(cvs->dev, "%s:FW update not supported on LIGHTCAP", __func__);
+		return -EOPNOTSUPP;
+	}
 
 	if (cvs_get_fwver_vid_pid()) {
 		dev_err(cvs->dev, "%s:Not able to read vid/pid", __func__);
@@ -540,7 +583,7 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 {
 	unsigned long flags;
 	struct file *f;
-	int fw_bin_size;
+	loff_t fw_bin_size;
 	ssize_t bytes_read = 0;
 
 	if (!buf) {
@@ -548,10 +591,25 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 		return -EINVAL;
 	}
 
+	if (cvs->cap != ICVS_FULLCAP) {
+		dev_err(cvs->dev, "%s:FW update not supported on LIGHTCAP", __func__);
+		return -EOPNOTSUPP;
+	}
+
 	if (count == 0 || count != sizeof(struct plugin_to_cvs_interface)) {
 		dev_err(cvs->dev, "%s:Wrong count:%x", __func__, (unsigned int)count);
 		return -EINVAL;
 	}
+
+	/*
+	 * Reset download tracking state here (at the start of a new update
+	 * request) rather than in the show handler.  Resetting in show means
+	 * any concurrent read (even an unprivileged one) silently zeroes
+	 * in-flight progress counters and triggers a spurious re-download.
+	 */
+	memset(&cvs->info_fwupd, 0, sizeof(struct ctrl_data_fwupd));
+	cvs->fw_dl_task_finished = false;
+	cvs->fw_dl_task_started = false;
 
 	spin_lock_irqsave(&cvs->buffer_lock, flags);
 	memcpy(&cvs->plugin_to_cvs, buf, count);
@@ -570,17 +628,36 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 		return -EBADF;
 	}
 
-	fw_bin_size = generic_file_llseek(f, 0, SEEK_END);
-	dev_dbg(cvs->dev, "%s:Calculated fw_bin size:%x bytes",
-			__func__, fw_bin_size);
-	generic_file_llseek(f, -fw_bin_size, SEEK_CUR);
+	/*
+	 * generic_file_llseek() returns loff_t; assigning to int silently
+	 * truncates files larger than 2 GiB and produces a wrong (positive)
+	 * seek-back offset.  Use vfs_llseek() + loff_t throughout, and treat
+	 * a non-positive size as an error rather than seeking backwards.
+	 */
+	fw_bin_size = vfs_llseek(f, 0, SEEK_END);
+	if (fw_bin_size <= 0) {
+		dev_err(cvs->dev, "%s:Failed to determine fw file size: %lld",
+				__func__, fw_bin_size);
+		fput(f);
+		return fw_bin_size < 0 ? (ssize_t)fw_bin_size : -EINVAL;
+	}
+	vfs_llseek(f, 0, SEEK_SET);
 
-	cvs->fw_buffer_size = fw_bin_size;
+	dev_dbg(cvs->dev, "%s:Calculated fw_bin size:%llx bytes",
+			__func__, fw_bin_size);
+
+	cvs->fw_buffer_size = (u32)fw_bin_size;
 	cvs->max_flashtime_ms = cvs->plugin_to_cvs.max_flash_time;
 	cvs->fw_update_retries = cvs->plugin_to_cvs.max_fwupd_retry_count;
+
+	/* Free any buffer left over from a previous (possibly failed) update */
+	if (cvs->fw_buffer) {
+		vfree(cvs->fw_buffer);
+		cvs->fw_buffer = NULL;
+	}
 	cvs->fw_buffer = vmalloc(cvs->fw_buffer_size);
 
-	if (IS_ERR_OR_NULL(cvs->fw_buffer)) {
+	if (!cvs->fw_buffer) {
 		dev_err(cvs->dev, "%s:No memory for fw_buffer", __func__);
 		fput(f);
 		return -ENOMEM;
@@ -594,6 +671,9 @@ static ssize_t cvs_ctrl_data_pre_store(struct device *dev,
 	if (bytes_read != cvs->fw_buffer_size) {
 		dev_err(cvs->dev, "%s:kernel_read failed with bytes_read:%lx",
 				__func__, bytes_read);
+		/* Free the buffer to avoid leaving stale data on retry */
+		vfree(cvs->fw_buffer);
+		cvs->fw_buffer = NULL;
 		return -EIO;
 	} else {
 		dev_info(cvs->dev, "%s:Full fw_buffer received. Start fw_download",

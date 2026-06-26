@@ -37,7 +37,7 @@ static int cvs_init(struct intel_cvs *icvs)
 		return -EINVAL;
 
 	ret = devm_request_irq(icvs->dev, icvs->irq, cvs_irq_handler,
-						   IRQF_ONESHOT | IRQF_NO_SUSPEND,
+						   IRQF_NO_SUSPEND,
 						   dev_name(icvs->dev), icvs);
 	if (ret)
 		dev_err(icvs->dev, "Failed to request irq");
